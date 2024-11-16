@@ -5,6 +5,23 @@
 
 // KlyLogger: 轻量、直观、易用的 logger
 class KlyLogger {
+public:
+	// 系统默认编码字符串转宽字符串
+	static inline std::wstring wideString(const std::string& src) {
+		int len = MultiByteToWideChar(CP_ACP, 0, src.c_str(), -1, nullptr, 0); // 获取原字符串在系统默认编码下的字符数
+		std::wstring str(len - 1, 0); // 开辟长度为原字符串长度的宽字符串
+		MultiByteToWideChar(CP_ACP, 0, src.c_str(), -1, str.data(), len); // 将原字符串转为宽字符串
+		return str;
+	}
+
+	// 宽字符串转 UTF8 字符串
+	static inline std::string UTF8(const std::wstring& src) {
+		int len = WideCharToMultiByte(CP_UTF8, 0, src.c_str(), -1, nullptr, 0, nullptr, nullptr); // 获取原字符串在系统默认编码下的字符数
+		std::string str(len - 1, 0); // 开辟长度为原字符串长度的宽字符串
+		WideCharToMultiByte(CP_UTF8, 0, src.c_str(), -1, str.data(), len, nullptr, nullptr); // 将原字符串转为宽字符串
+		return str; // 返回新宽字符串
+	}
+
 private:
 	// 获取当前时间
 	static inline std::tm getLocalTime() {
@@ -62,22 +79,6 @@ private:
 			CloseHandle(hLogFile);
 			hLogFile = getLogFileHandle();
 		}
-	}
-
-	// 系统默认编码字符串转宽字符串
-	static inline std::wstring wideString(const std::string& src) {
-		int len = MultiByteToWideChar(CP_ACP, 0, src.c_str(), -1, nullptr, 0); // 获取原字符串在系统默认编码下的字符数
-		std::wstring str(len - 1, 0); // 开辟长度为原字符串长度的宽字符串
-		MultiByteToWideChar(CP_ACP, 0, src.c_str(), -1, str.data(), len); // 将原字符串转为宽字符串
-		return str;
-	}
-
-	// 宽字符串转 UTF8 字符串
-	static inline std::string UTF8(const std::wstring& src) {
-		int len = WideCharToMultiByte(CP_UTF8, 0, src.c_str(), -1, nullptr, 0, nullptr, nullptr); // 获取原字符串在系统默认编码下的字符数
-		std::string str(len - 1, 0); // 开辟长度为原字符串长度的宽字符串
-		WideCharToMultiByte(CP_UTF8, 0, src.c_str(), -1, str.data(), len, nullptr, nullptr); // 将原字符串转为宽字符串
-		return str; // 返回新宽字符串
 	}
 
 	// 使 logger 名称合理化
@@ -217,7 +218,11 @@ private:
 	// 输出日志信息
 	static inline void logMessage(const std::wstring& name, std::wstring message, const std::string& level, WORD levelColor, WORD textColor) {
 		size_t newlinePos;
-		while ((newlinePos = message.find(L'\n')) != std::string::npos) {
+#ifdef min
+		while ((newlinePos = min(message.find(L'\n'), message.find(L"\r\n"))) != std::string::npos) { // \r\n: CRLF
+#else
+		while ((newlinePos = std::min(message.find(L'\n'), message.find(L"\r\n"))) != std::string::npos) {
+#endif
 			logMessage(name, message.substr(0, newlinePos), level, levelColor, textColor);
 			message = message.substr(newlinePos + 1);
 		}
