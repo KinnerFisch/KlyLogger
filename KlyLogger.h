@@ -80,7 +80,7 @@ private:
 		return str; // 返回新宽字符串
 	}
 
-	// 使 logger 名称合法化
+	// 使 logger 名称合理化
 	static inline std::wstring legalizeLoggerName(const std::wstring& name) {
 		// 查找最后一个回车符或换行符
 #ifdef max
@@ -90,9 +90,7 @@ private:
 #endif
 
 		// 截取回车或换行符右侧的字符串
-		std::wstring result = (lastPos != std::string::npos) ? name.substr(lastPos + 1) : name;
-
-		return result;
+		return lastPos != std::string::npos ? name.substr(lastPos + 1) : name;
 	}
 
 	// 获取当前控制台文本属性
@@ -102,8 +100,6 @@ private:
 		return buffer.wAttributes;
 	}
 
-	std::wstring _name; // logger 名称
-
 	struct LogTask {
 		std::wstring name, message;
 		std::string level;
@@ -111,11 +107,17 @@ private:
 	};
 
 	static inline std::queue<LogTask> logQueue; // 任务队列
-	static std::thread workerThread; // logger 线程
 
-	// 启动线程
+	// 启动 logger 专用线程
 	static inline int startWorkerThread() {
-		workerThread.detach();
+		std::thread([]() {
+			while (true) {
+				while (logQueue.empty());
+				LogTask task = logQueue.front();
+				logMessage(task.name, task.message, task.level, task.levelColor, task.textColor);
+				logQueue.pop();
+			}
+		}).detach();
 		return 0;
 	}
 
@@ -158,7 +160,7 @@ private:
 		if (hLogFile != INVALID_HANDLE_VALUE) WriteFile(hLogFile, utf8.c_str(), (DWORD)utf8.length(), nullptr, nullptr);
 	}
 
-	// 打印头部信息
+	// 打印日志头消息
 	static inline void printHead(const std::wstring& name, const std::string& level, WORD levelColor, WORD textColor) {
 		std::tm localTime = getLocalTime();
 		WriteFile(hStderr, "\r", 1, nullptr, nullptr);
@@ -181,7 +183,7 @@ private:
 		SetConsoleTextAttribute(hStderr, textColor);
 	}
 
-	// 预处理参数
+	// 预处理消息参数
 	template<typename T>
 	static inline auto processArg(const T& arg) {
 		if constexpr (std::is_same_v<T, std::string> || std::is_convertible_v<T, const char*>) return wideString(arg);
@@ -219,11 +221,15 @@ private:
 			logMessage(name, message.substr(0, newlinePos), level, levelColor, textColor);
 			message = message.substr(newlinePos + 1);
 		}
-		printHead(name, level, levelColor, textColor);
-		write(message.substr(message.find_last_of(L'\r') + 1));
-		SetConsoleTextAttribute(hStderr, FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_RED);
-		write("\n");
+		if (message[0]) { // 确保消息不是空字符串
+			printHead(name, level, levelColor, textColor);
+			write(message.substr(message.find_last_of(L'\r') + 1));
+			SetConsoleTextAttribute(hStderr, FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_RED);
+			write("\n");
+		}
 	}
+
+	std::wstring _name; // logger 名称
 
 	// 添加任务
 	template<typename... Args>
@@ -286,15 +292,4 @@ public:
 	}
 };
 
-// logger 专用线程
-std::thread KlyLogger::workerThread = std::thread([]() {
-	while (true) {
-		while (logQueue.empty());
-		LogTask task = logQueue.front();
-		logMessage(task.name, task.message, task.level, task.levelColor, task.textColor);
-		FlushFileBuffers(hStderr);
-		logQueue.pop();
-	}
-	});
-
-int KlyLogger::iStartWorkerThread = startWorkerThread(); // 启动线程
+int KlyLogger::iStartWorkerThread = startWorkerThread(); // 启动 logger 专用线程
