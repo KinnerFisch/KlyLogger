@@ -5,7 +5,7 @@
 
 // KlyLogger: 轻量、直观、易用的 logger
 class KlyLogger {
-public:
+private:
 	// 系统默认编码字符串转宽字符串
 	static inline std::wstring wideString(const std::string& src) {
 		int len = MultiByteToWideChar(CP_ACP, 0, src.c_str(), -1, nullptr, 0); // 获取原字符串在系统默认编码下的字符数
@@ -22,13 +22,13 @@ public:
 		return str; // 返回新宽字符串
 	}
 
-private:
 	// 获取当前时间
 	static inline std::tm getLocalTime() {
 		time_t now = time(nullptr); // 获取当前时间戳
 		return *localtime(&now); // 转换为结构体
 	}
 
+#ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
 	static inline unsigned logFileCreateDate = 0; // 日志文件创建时间
 
 	// 获取当前日志文件句柄
@@ -69,7 +69,8 @@ private:
 		logFileCreateDate = (time.tm_year << 16) + (time.tm_mon << 8) + time.tm_mday;
 		return CreateFileA("logs\\latest.log", GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
 	}
-	static inline HANDLE hStderr = GetStdHandle(STD_ERROR_HANDLE), hLogFile = getLogFileHandle(); // stderr 输出流及日志文件句柄
+
+	static inline HANDLE hLogFile = getLogFileHandle(); // 日志文件句柄
 
 	// 更新日志文件句柄
 	static inline void updateLogFileHandle() {
@@ -80,6 +81,9 @@ private:
 			hLogFile = getLogFileHandle();
 		}
 	}
+#endif
+
+	static inline HANDLE hStderr = GetStdHandle(STD_ERROR_HANDLE); // stderr 输出流
 
 	// 使 logger 名称合理化
 	static inline std::wstring legalizeLoggerName(const std::wstring& name) {
@@ -127,7 +131,9 @@ private:
 	// 输出信息 (字符串)
 	static inline void write(const std::string& msg) {
 		WriteFile(hStderr, msg.c_str(), (DWORD)msg.length(), nullptr, nullptr);
+#ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
 		if (hLogFile != INVALID_HANDLE_VALUE) WriteFile(hLogFile, msg.c_str(), (DWORD)msg.length(), nullptr, nullptr);
+#endif
 	}
 
 	// 输出信息 (宽字符串)
@@ -157,8 +163,10 @@ private:
 		}
 		WriteConsoleW(hStderr, msg.c_str(), (DWORD)msg.length(), nullptr, nullptr);
 
+#ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
 		std::string utf8 = UTF8(msg);
 		if (hLogFile != INVALID_HANDLE_VALUE) WriteFile(hLogFile, utf8.c_str(), (DWORD)utf8.length(), nullptr, nullptr);
+#endif
 	}
 
 	// 打印日志头消息
@@ -192,7 +200,7 @@ private:
 		else return arg;
 	}
 
-	// 获取参数可能占用的字符串大小
+	// 获取参数可能使用长度
 	template<typename T>
 	static inline size_t getLength(const T& arg) {
 		if constexpr (std::is_same_v<T, std::string> || std::is_same_v<T, std::wstring>) return arg.length();
@@ -239,7 +247,9 @@ private:
 	// 添加任务
 	template<typename... Args>
 	inline void pushTask(const std::wstring& message, const std::string& level, WORD levelColor, WORD textColor, Args... args) {
+#ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
 		updateLogFileHandle();
+#endif
 
 		std::wstring formatted = formatMessage(message.c_str(), args...);
 
