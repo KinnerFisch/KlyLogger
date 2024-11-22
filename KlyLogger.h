@@ -1,8 +1,19 @@
 #define _CRT_SECURE_NO_WARNINGS
 #include <functional>
 #include <Windows.h>
+#include <format>
 #include <thread>
 #include <queue>
+
+// 检测转字符串成员函数
+template <typename T, typename = void>
+struct has_to_string : std::false_type {};
+template <typename T>
+struct has_to_string<T, std::void_t<decltype(std::declval<T>().to_string())>> : std::true_type {};
+template <typename T, typename = void>
+struct has_to_wstring : std::false_type {};
+template <typename T>
+struct has_to_wstring<T, std::void_t<decltype(std::declval<T>().to_wstring())>> : std::true_type {};
 
 // KlyLogger: 轻量、直观、易用的 logger
 class KlyLogger {
@@ -16,7 +27,9 @@ private:
 	static inline std::function<void()> fOnLog = nullptr; // 输出日志后任务
 	static inline std::queue<LogTask> logQueue; // 任务队列
 	static int iStartWorkerThread; // 启动线程
-	std::wstring _name; // logger 名称
+
+	std::wstring _name, as_wstring; // 名称及转宽字符串缓存
+	std::string as_string; // 转字符串缓存
 
 	// 系统默认编码字符串转宽字符串
 	static inline std::wstring wideString(const std::string& src) {
@@ -26,11 +39,11 @@ private:
 		return str;
 	}
 
-	// 宽字符串转 UTF-8 字符串
-	static inline std::string UTF8(const std::wstring& src) {
-		int len = WideCharToMultiByte(CP_UTF8, 0, src.c_str(), -1, nullptr, 0, nullptr, nullptr); // 获取原字符串在系统默认编码下的字符数
+	// 宽字符串转特定编码字符串
+	static inline std::string simpleString(unsigned codepage, const std::wstring& src) {
+		int len = WideCharToMultiByte(codepage, 0, src.c_str(), -1, nullptr, 0, nullptr, nullptr); // 获取原字符串在系统默认编码下的字符数
 		std::string str(len - 1, 0); // 开辟长度为原字符串长度的宽字符串
-		WideCharToMultiByte(CP_UTF8, 0, src.c_str(), -1, str.data(), len, nullptr, nullptr); // 将原字符串转为宽字符串
+		WideCharToMultiByte(codepage, 0, src.c_str(), -1, str.data(), len, nullptr, nullptr); // 将原字符串转为宽字符串
 		return str; // 返回新宽字符串
 	}
 
@@ -41,9 +54,6 @@ private:
 	}
 
 #ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
-	static inline unsigned logFileCreateDate = 0; // 日志文件创建时间
-	static inline std::string logsDirectory, latestLog; // 日志文件目录 (最初工作目录下的 logs 文件夹) 及最新日志文件地址 (常用值)
-
 	// 获取当前日志文件句柄
 	static inline HANDLE getLogFileHandle() {
 		if (logsDirectory.empty() || latestLog.empty()) {
@@ -68,19 +78,16 @@ private:
 				SystemTimeToTzSpecificLocalTime(nullptr, &stUTC, &stLocal);
 			} else GetLocalTime(&stLocal);
 			unsigned i = 0;
-			while (true) {
-				char newFileName[1024];
-				strcpy_s(newFileName, logsDirectory.c_str());
-				_snprintf_s(newFileName + logsDirectory.length(), 100, _TRUNCATE, "%04d-%02d-%02d-%d.log", stLocal.wYear, stLocal.wMonth, stLocal.wDay, ++i);
-				if (MoveFileA(latestLog.c_str(), newFileName)) break;
-			}
+			while (true) if (MoveFileA(latestLog.c_str(), std::format("{}{:04}-{:-2}-{:-2}-{}.log", logsDirectory, stLocal.wYear, stLocal.wMonth, stLocal.wDay, ++i).c_str())) break;
 		}
 		std::tm time = getLocalTime();
 		logFileCreateDate = (time.tm_year << 16) + (time.tm_mon << 8) + time.tm_mday;
 		return CreateFileA(latestLog.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
 	}
 
+	static inline unsigned logFileCreateDate = 0; // 日志文件创建时间
 	static inline HANDLE hLogFile = getLogFileHandle(); // 日志文件句柄
+	static inline std::string logsDirectory, latestLog; // 日志文件目录及最新日志文件地址 (常用值)
 
 	// 更新日志文件句柄
 	static inline void updateLogFileHandle() {
@@ -164,7 +171,7 @@ private:
 		}
 		WriteConsoleW(hStderr, msg.c_str(), (DWORD)msg.length(), nullptr, nullptr);
 #ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
-		std::string utf8 = UTF8(msg);
+		std::string utf8 = simpleString(CP_UTF8, msg);
 		if (hLogFile != INVALID_HANDLE_VALUE) WriteFile(hLogFile, utf8.c_str(), (DWORD)utf8.length(), nullptr, nullptr);
 #endif
 	}
@@ -176,9 +183,7 @@ private:
 		SetConsoleTextAttribute(hStderr, FOREGROUND_BLUE | FOREGROUND_GREEN);
 		write("[");
 		SetConsoleTextAttribute(hStderr, FOREGROUND_BLUE | FOREGROUND_INTENSITY);
-		char time[10] = "";
-		_snprintf_s(time, 10, _TRUNCATE, "%02d:%02d:%02d ", localTime.tm_hour, localTime.tm_min, localTime.tm_sec);
-		write(time);
+		write(std::format("{:02}:{:02}:{:02} ", localTime.tm_hour, localTime.tm_min, localTime.tm_sec));
 		SetConsoleTextAttribute(hStderr, levelColor);
 		write(level);
 		SetConsoleTextAttribute(hStderr, FOREGROUND_BLUE | FOREGROUND_GREEN);
@@ -192,44 +197,13 @@ private:
 		SetConsoleTextAttribute(hStderr, textColor);
 	}
 
-	// 预处理消息参数
-	template<typename T>
-	static inline auto processArg(const T& arg) {
-		if constexpr (std::is_same_v<T, std::string> || std::is_convertible_v<T, const char*>) return wideString(arg);
-		else if constexpr (std::is_same_v<T, bool>) return arg ? L"true" : L"false";
-		else return arg;
-	}
-
-	// 获取参数可能使用长度
-	template<typename T>
-	static inline size_t getLength(const T& arg) {
-		if constexpr (std::is_same_v<T, std::string> || std::is_same_v<T, std::wstring>) return arg.length();
-		if constexpr (std::is_same_v<T, short> || std::is_same_v<T, unsigned short>) return 5;
-		if constexpr (std::is_same_v<T, int> || std::is_same_v<T, unsigned> || std::is_same_v<T, long> || std::is_same_v<T, unsigned long>) return 10;
-		if constexpr (std::is_same_v<T, long long> || std::is_same_v<T, unsigned long long>) return 20;
-		if constexpr (std::is_same_v<T, float>) return 15;
-		if constexpr (std::is_same_v<T, double>) return 25;
-		if constexpr (std::is_same_v<T, long double>) return 35;
-		if constexpr (std::is_same_v<T, bool>) return 5;
-		return sizeof(arg);
-	}
-
-	// 格式化日志消息
-	template<typename... Args>
-	static inline std::wstring formatMessage(const std::wstring& message, const Args&... args) {
-		size_t len = message.length() + (0 + ... + getLength(args)) + 1;
-		auto* arr = new wchar_t[len];
-		_snwprintf_s(arr, len, _TRUNCATE, message.c_str(), processArg(args)...);
-		return arr;
-	}
-
 	// 输出日志信息
 	static inline void logMessage(const std::wstring& name, std::wstring message, const std::string& level, WORD levelColor, WORD textColor) {
 		size_t newlinePos;
 #ifdef min
-		while ((newlinePos = min(message.find(L'\n'), message.find(L"\r\n"))) != std::wstring::npos) {
+		while ((newlinePos = min(message.find(L'\r'), message.find(L'\n'))) != std::wstring::npos) {
 #else
-		while ((newlinePos = std::min(message.find(L'\n'), message.find(L"\r\n"))) != std::wstring::npos) {
+		while ((newlinePos = std::min(message.find(L'\r'), message.find(L'\n'))) != std::wstring::npos) {
 #endif
 			logMessage(name, message.substr(0, newlinePos), level, levelColor, textColor);
 			message = message.substr(newlinePos + 1);
@@ -242,26 +216,52 @@ private:
 		}
 	}
 
-	// 添加任务
+	// 预处理消息参数: 将普通字符串转为宽字符串
+	template<typename T>
+	static inline auto& processFormattings(const T& arg) {
+		if constexpr (std::is_same_v<T, std::string> || std::is_convertible_v<T, const char*>) {
+			const static std::wstring& result = wideString(arg);
+			return result;
+		} else if constexpr (has_to_wstring<T>::value) {
+			const static std::wstring& result = arg.to_wstring();
+			return result;
+		} else if constexpr (has_to_string<T>::value) {
+			const static std::wstring& result = wideString(arg.to_string());
+			return result;
+		} else return arg;
+	}
+
+	// 添加日志任务
 	template<typename... Args>
 	inline void pushTask(const std::wstring& message, const std::string& level, WORD levelColor, WORD textColor, Args... args) {
 #ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
 		updateLogFileHandle();
 #endif
-		std::wstring formatted = formatMessage(message.c_str(), args...);
+		std::wstring formatted;
+		try {
+			formatted = std::vformat(message, std::make_wformat_args(processFormattings(args)...));
+		} catch (const std::exception& e) {
+			formatted = wideString(e.what());
+		} catch (...) {}
 		LogTask task = { _name, formatted, level, levelColor, textColor };
 		logQueue.push(task);
 	}
 
 public:
 	// 创建无名 logger
-	KlyLogger() = default;
+	KlyLogger() : as_string("KlyLogger{name=<empty>}"), as_wstring(L"KlyLogger{name=<empty>}") {};
 
 	// 以宽字符串类型名称创建 logger
-	explicit KlyLogger(const std::wstring& name) : _name(legalizeLoggerName(name)) {}
+	explicit KlyLogger(const std::wstring& name) : _name(legalizeLoggerName(name)), as_wstring(std::wstring(L"KlyLogger{name=") + (_name.empty() ? L"<empty>" : _name) + L'}'), as_string(simpleString(CP_ACP, as_wstring)) {}
 
 	// 以普通字符串类型名称创建 logger
-	explicit KlyLogger(const std::string& name) : _name(legalizeLoggerName(wideString(name))) {}
+	explicit KlyLogger(const std::string& name) : _name(legalizeLoggerName(wideString(name))), as_wstring(std::wstring(L"KlyLogger{name=") + (_name.empty() ? L"<empty>" : _name) + L'}'), as_string(simpleString(CP_ACP, as_wstring)) {}
+
+	// 转为字符串
+	inline std::string to_string() const { return as_string; }
+	
+	// 转为宽字符串
+	inline std::wstring to_wstring() const { return as_wstring; }
 
 	// 输出普通信息 (宽字符串)
 	template<typename... Args>
@@ -309,4 +309,4 @@ public:
 	static inline void onLog(const std::function<void()>& func) { fOnLog = func; }
 };
 
-int KlyLogger::iStartWorkerThread = startWorkerThread(); // 启动 logger 专用线程
+int KlyLogger::iStartWorkerThread = startWorkerThread(); // 启动异步线程
