@@ -146,7 +146,7 @@ private:
 	// 输出信息 (宽字符串)
 	static inline void write(std::wstring msg) {
 		size_t pos;
-		while ((pos = msg.find(L'§')) != std::wstring::npos) {
+		while ((pos = msg.find(L'§')) != std::string::npos) {
 			write(msg.substr(0, pos));
 			wchar_t code = msg[pos + 1];
 			if (code == L'0') SetConsoleTextAttribute(hStderr, 0);
@@ -233,7 +233,7 @@ private:
 
 	// 添加日志任务
 	template<typename... Args>
-	inline void pushTask(const std::wstring& message, const std::string& level, WORD levelColor, WORD textColor, Args... args) {
+	inline void pushTask(const std::wstring& message, const std::string& level, WORD levelColor, WORD textColor, const Args&... args) const {
 #ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
 		updateLogFileHandle();
 #endif
@@ -251,10 +251,10 @@ public:
 	// 创建无名 logger
 	KlyLogger() : as_string("KlyLogger{name=<empty>}"), as_wstring(L"KlyLogger{name=<empty>}") {};
 
-	// 以宽字符串类型名称创建 logger
+	// 以宽字符串类型的字符串作为名称创建 logger
 	explicit KlyLogger(const std::wstring& name) : _name(legalizeLoggerName(name)), as_wstring(std::wstring(L"KlyLogger{name=") + (_name.empty() ? L"<empty>" : _name) + L'}'), as_string(simpleString(CP_ACP, as_wstring)) {}
 
-	// 以普通字符串类型名称创建 logger
+	// 以普通字符串类型的字符串作为名称创建 logger
 	explicit KlyLogger(const std::string& name) : _name(legalizeLoggerName(wideString(name))), as_wstring(std::wstring(L"KlyLogger{name=") + (_name.empty() ? L"<empty>" : _name) + L'}'), as_string(simpleString(CP_ACP, as_wstring)) {}
 
 	// 转为字符串
@@ -265,47 +265,47 @@ public:
 
 	// 输出普通信息 (宽字符串)
 	template<typename... Args>
-	inline void info(const std::wstring& message, const Args&... args) { pushTask(message, "INFO", FOREGROUND_GREEN | FOREGROUND_INTENSITY, FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_RED, args...); }
+	inline void info(const std::wstring& message, const Args&... args) const { pushTask(message, "INFO", FOREGROUND_GREEN | FOREGROUND_INTENSITY, FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_RED, args...); }
 
 	// 输出普通信息 (字符串)
 	template<typename... Args>
-	inline void info(const std::string& message, const Args&... args) { info(wideString(message), args...); }
+	inline void info(const std::string& message, const Args&... args) const { info(wideString(message), args...); }
 
 	// 输出警告信息 (宽字符串)
 	template<typename... Args>
-	inline void warn(const std::wstring& message, const Args&... args) { pushTask(message, "WARN", FOREGROUND_GREEN | FOREGROUND_RED, FOREGROUND_GREEN | FOREGROUND_RED | FOREGROUND_INTENSITY, args...); }
+	inline void warn(const std::wstring& message, const Args&... args) const { pushTask(message, "WARN", FOREGROUND_GREEN | FOREGROUND_RED, FOREGROUND_GREEN | FOREGROUND_RED | FOREGROUND_INTENSITY, args...); }
 
 	// 输出警告信息 (字符串)
 	template<typename... Args>
-	inline void warn(const std::string& message, const Args&... args) { warn(wideString(message), args...); }
+	inline void warn(const std::string& message, const Args&... args) const { warn(wideString(message), args...); }
 
 	// 输出错误信息 (宽字符串)
 	template<typename... Args>
-	inline void error(const std::wstring& message, const Args&... args) { pushTask(message, "ERROR", FOREGROUND_RED, FOREGROUND_RED | FOREGROUND_INTENSITY, args...); }
+	inline void error(const std::wstring& message, const Args&... args) const { pushTask(message, "ERROR", FOREGROUND_RED, FOREGROUND_RED | FOREGROUND_INTENSITY, args...); }
 
 	// 输出错误信息 (字符串)
 	template<typename... Args>
-	inline void error(const std::string& message, const Args&... args) { error(wideString(message), args...); }
+	inline void error(const std::string& message, const Args&... args) const { error(wideString(message), args...); }
 
 	// 输出严重错误信息 (宽字符串)
 	template<typename... Args>
-	inline void fatal(const std::wstring& message, const Args&... args) { pushTask(message, "FATAL", COMMON_LVB_UNDERSCORE | FOREGROUND_RED, FOREGROUND_RED, args...); }
+	inline void fatal(const std::wstring& message, const Args&... args) const { pushTask(message, "FATAL", COMMON_LVB_UNDERSCORE | FOREGROUND_RED, FOREGROUND_RED, args...); }
 
 	// 输出严重错误信息 (字符串)
 	template<typename... Args>
-	inline void fatal(const std::string& message, const Args&... args) { fatal(wideString(message), args...); }
+	inline void fatal(const std::string& message, const Args&... args) const { fatal(wideString(message), args...); }
 
 	// 判断是否完成所有日志输出任务
 	static inline bool finishedTasks() { return logQueue.empty(); }
 
-	// 等待日志输出完毕 (3s)
+	// 等待日志输出完毕
 	static inline void wait() {
 		Sleep(1500);
 		while (!finishedTasks());
 		Sleep(1500);
 	}
 
-	// 设置输出日志后行为
+	// 设置输出后行为
 	static inline void onLog(const std::function<void()>& func) { fOnLog = func; }
 };
 
