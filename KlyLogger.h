@@ -23,6 +23,7 @@ private:
 		std::string level;
 		WORD levelColor, textColor;
 	};
+
 	static inline HANDLE hStderr = GetStdHandle(STD_ERROR_HANDLE); // stderr 输出流
 	static inline std::function<void()> fOnLog = nullptr; // 输出日志后任务
 	static inline std::queue<LogTask> logQueue; // 任务队列
@@ -48,7 +49,7 @@ private:
 	}
 
 	// 获取当前时间
-	static inline std::tm getLocalTime() {
+	static inline tm getLocalTime() {
 		time_t now = time(nullptr); // 获取当前时间戳
 		return *localtime(&now); // 转换为结构体
 	}
@@ -80,7 +81,7 @@ private:
 			unsigned i = 0;
 			while (true) if (MoveFileA(latestLog.c_str(), std::format("{}{:04}-{:-2}-{:-2}-{}.log", logsDirectory, stLocal.wYear, stLocal.wMonth, stLocal.wDay, ++i).c_str())) break;
 		}
-		std::tm time = getLocalTime();
+		tm time = getLocalTime();
 		logFileCreateDate = (time.tm_year << 16) + (time.tm_mon << 8) + time.tm_mday;
 		return CreateFileA(latestLog.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
 	}
@@ -91,7 +92,7 @@ private:
 
 	// 更新日志文件句柄
 	static inline void updateLogFileHandle() {
-		std::tm time = getLocalTime();
+		tm time = getLocalTime();
 		unsigned date = (time.tm_year << 16) + (time.tm_mon << 8) + time.tm_mday;
 		if (date != logFileCreateDate) {
 			CloseHandle(hLogFile);
@@ -104,9 +105,9 @@ private:
 	static inline std::wstring legalizeLoggerName(const std::wstring& name) {
 		// 查找最后一个回车符或换行符
 #ifdef max
-		long long lastPos = max((long long)name.find_last_of(L'\r'), (long long)name.find_last_of(L'\n'));
+		intptr_t lastPos = max((intptr_t)name.find_last_of(L'\r'), (intptr_t)name.find_last_of(L'\n'));
 #else
-		long long lastPos = std::max((long long)name.find_last_of(L'\r'), (long long)name.find_last_of(L'\n'));
+		intptr_t lastPos = std::max((intptr_t)name.find_last_of(L'\r'), (intptr_t)name.find_last_of(L'\n'));
 #endif
 		// 截取回车或换行符右侧的字符串
 		return lastPos != std::wstring::npos ? name.substr(lastPos + 1) : name;
@@ -144,10 +145,11 @@ private:
 	}
 
 	// 输出信息 (宽字符串)
-	static inline void write(std::wstring msg) {
+	static inline void write(std::wstring msg, WORD initialColor) {
+		while (msg.back() == L'§') msg.pop_back();
 		size_t pos;
 		while ((pos = msg.find(L'§')) != std::string::npos) {
-			write(msg.substr(0, pos));
+			write(msg.substr(0, pos), initialColor);
 			wchar_t code = msg[pos + 1];
 			if (code == L'0') SetConsoleTextAttribute(hStderr, 0);
 			else if (code == L'1') SetConsoleTextAttribute(hStderr, FOREGROUND_BLUE);
@@ -156,6 +158,7 @@ private:
 			else if (code == L'4') SetConsoleTextAttribute(hStderr, FOREGROUND_RED);
 			else if (code == L'5') SetConsoleTextAttribute(hStderr, FOREGROUND_BLUE | FOREGROUND_RED);
 			else if (code == L'6') SetConsoleTextAttribute(hStderr, FOREGROUND_GREEN | FOREGROUND_RED);
+			else if (code == L'7') SetConsoleTextAttribute(hStderr, FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_RED);
 			else if (code == L'8') SetConsoleTextAttribute(hStderr, FOREGROUND_INTENSITY);
 			else if (code == L'9') SetConsoleTextAttribute(hStderr, FOREGROUND_BLUE | FOREGROUND_INTENSITY);
 			else if (code == L'a') SetConsoleTextAttribute(hStderr, FOREGROUND_GREEN | FOREGROUND_INTENSITY);
@@ -166,7 +169,7 @@ private:
 			else if (code == L'f') SetConsoleTextAttribute(hStderr, FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_RED | FOREGROUND_INTENSITY);
 			else if (code == L'k') SetConsoleTextAttribute(hStderr, getTextAttribute() | COMMON_LVB_REVERSE_VIDEO);
 			else if (code == L'n') SetConsoleTextAttribute(hStderr, getTextAttribute() | COMMON_LVB_UNDERSCORE);
-			else if (code == L'7' || code == L'r') SetConsoleTextAttribute(hStderr, FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_RED);
+			else if (code == L'r') SetConsoleTextAttribute(hStderr, initialColor);
 			msg = msg.substr(pos + 2);
 		}
 		WriteConsoleW(hStderr, msg.c_str(), (DWORD)msg.length(), nullptr, nullptr);
@@ -176,9 +179,9 @@ private:
 #endif
 	}
 
-	// 打印日志头
-	static inline void printHead(const std::wstring& name, const std::string& level, WORD levelColor, WORD textColor) {
-		std::tm localTime = getLocalTime();
+	// 输出时间
+	static inline void printTime(const std::wstring& name, const std::string& level, WORD levelColor, WORD textColor) {
+		tm localTime = getLocalTime();
 		WriteFile(hStderr, "\r", 1, nullptr, nullptr);
 		SetConsoleTextAttribute(hStderr, FOREGROUND_BLUE | FOREGROUND_GREEN);
 		write("[");
@@ -190,7 +193,7 @@ private:
 		write("] ");
 		if (!name.empty()) {
 			write("[");
-			write(name);
+			write(name, FOREGROUND_BLUE | FOREGROUND_GREEN);
 			SetConsoleTextAttribute(hStderr, FOREGROUND_BLUE | FOREGROUND_GREEN);
 			write("] ");
 		}
@@ -209,8 +212,8 @@ private:
 			message = message.substr(newlinePos + 1);
 		}
 		if (message[0]) { // 确保消息不是空字符串
-			printHead(name, level, levelColor, textColor);
-			write(message.substr(message.find_last_of(L'\r') + 1));
+			printTime(name, level, levelColor, textColor);
+			write(message.substr(message.find_last_of(L'\r') + 1), textColor);
 			SetConsoleTextAttribute(hStderr, FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_RED);
 			write("\n");
 		}
@@ -309,4 +312,4 @@ public:
 	static inline void onLog(const std::function<void()>& func) { fOnLog = func; }
 };
 
-int KlyLogger::iStartWorkerThread = startWorkerThread(); // 启动异步线程
+int KlyLogger::iStartWorkerThread = startWorkerThread(); // 启动 logger 专用线程
