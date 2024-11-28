@@ -10,6 +10,7 @@ template <typename T, typename = void>
 struct has_to_string : std::false_type {};
 template <typename T>
 struct has_to_string<T, std::void_t<decltype(std::declval<T>().to_string())>> : std::true_type {};
+
 template <typename T, typename = void>
 struct has_to_wstring : std::false_type {};
 template <typename T>
@@ -246,8 +247,7 @@ private:
 		} catch (const std::exception& e) {
 			formatted = wideString(e.what());
 		} catch (...) {}
-		LogTask task = { _name, formatted, level, levelColor, textColor };
-		logQueue.push(task);
+		logQueue.push({ _name, formatted, level, levelColor, textColor });
 	}
 
 public:
@@ -302,11 +302,7 @@ public:
 	static inline bool finishedTasks() { return logQueue.empty(); }
 
 	// 等待日志输出完毕
-	static inline void wait() {
-		Sleep(1500);
-		while (!finishedTasks());
-		Sleep(1500);
-	}
+	static inline void wait() { while (!finishedTasks()) Sleep(1); }
 
 	// 设置输出后行为
 	static inline void onLog(const std::function<void()>& func) { fOnLog = func; }
