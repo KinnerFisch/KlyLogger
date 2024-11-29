@@ -1,4 +1,4 @@
-#define _CRT_SECURE_NO_WARNINGS
+#define KLY_LOGGER
 #include <functional>
 #include <Windows.h>
 #include <format>
@@ -10,7 +10,6 @@ template <typename T, typename = void>
 struct has_to_string : std::false_type {};
 template <typename T>
 struct has_to_string<T, std::void_t<decltype(std::declval<T>().to_string())>> : std::true_type {};
-
 template <typename T, typename = void>
 struct has_to_wstring : std::false_type {};
 template <typename T>
@@ -25,7 +24,7 @@ private:
 		WORD levelColor, textColor;
 	};
 
-	static inline HANDLE hStderr = GetStdHandle(STD_ERROR_HANDLE); // stderr 输出流
+	static inline HANDLE hStderr = GetStdHandle(STD_ERROR_HANDLE); // 标准错误输出句柄
 	static inline std::function<void()> fOnLog = nullptr; // 输出日志后任务
 	static inline std::queue<LogTask> logQueue; // 任务队列
 	static int iStartWorkerThread; // 启动线程
@@ -51,8 +50,10 @@ private:
 
 	// 获取当前时间
 	static inline tm getLocalTime() {
-		time_t now = time(nullptr); // 获取当前时间戳
-		return *localtime(&now); // 转换为结构体
+		time_t now = time(nullptr);
+		tm result;
+		if (localtime_s(&result, &now)) return {};
+		return result;
 	}
 
 #ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
@@ -89,7 +90,7 @@ private:
 
 	static inline unsigned logFileCreateDate = 0; // 日志文件创建时间
 	static inline HANDLE hLogFile = getLogFileHandle(); // 日志文件句柄
-	static inline std::string logsDirectory, latestLog; // 日志文件目录及最新日志文件地址 (常用值)
+	static inline std::string logsDirectory, latestLog; // 日志文件目录及最新日志文件地址
 
 	// 更新日志文件句柄
 	static inline void updateLogFileHandle() {
@@ -102,7 +103,7 @@ private:
 	}
 #endif
 
-	// 使 logger 名称合理化
+	// 规范化 logger 名称
 	static inline std::wstring legalizeLoggerName(const std::wstring& name) {
 		// 查找最后一个回车符或换行符
 #ifdef max
@@ -114,7 +115,7 @@ private:
 		return lastPos != std::wstring::npos ? name.substr(lastPos + 1) : name;
 	}
 
-	// 获取当前控制台文本属性
+	// 获取当前文字属性
 	static inline WORD getTextAttribute() {
 		CONSOLE_SCREEN_BUFFER_INFO buffer;
 		if (!GetConsoleScreenBufferInfo(hStderr, &buffer)) return FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_RED;
