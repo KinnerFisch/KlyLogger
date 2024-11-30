@@ -1,4 +1,4 @@
-#define KLY_LOGGER
+#define KLY_LOGGER_INCLUDED
 #include <functional>
 #include <Windows.h>
 #include <format>
@@ -33,7 +33,7 @@ private:
 	std::string as_string; // 转字符串缓存
 
 	// 系统默认编码字符串转宽字符串
-	static inline std::wstring wideString(const std::string& src) {
+	static inline std::wstring wideString(const std::string& src) noexcept {
 		int len = MultiByteToWideChar(CP_ACP, 0, src.c_str(), -1, nullptr, 0); // 获取原字符串在系统默认编码下的字符数
 		std::wstring str(len - 1, 0); // 开辟长度为原字符串长度的宽字符串
 		MultiByteToWideChar(CP_ACP, 0, src.c_str(), -1, str.data(), len); // 将原字符串转为宽字符串
@@ -41,7 +41,7 @@ private:
 	}
 
 	// 宽字符串转特定编码字符串
-	static inline std::string simpleString(unsigned codepage, const std::wstring& src) {
+	static inline std::string simpleString(unsigned codepage, const std::wstring& src) noexcept {
 		int len = WideCharToMultiByte(codepage, 0, src.c_str(), -1, nullptr, 0, nullptr, nullptr); // 获取原字符串在系统默认编码下的字符数
 		std::string str(len - 1, 0); // 开辟长度为原字符串长度的宽字符串
 		WideCharToMultiByte(codepage, 0, src.c_str(), -1, str.data(), len, nullptr, nullptr); // 将原字符串转为宽字符串
@@ -49,7 +49,7 @@ private:
 	}
 
 	// 获取当前时间
-	static inline tm getLocalTime() {
+	static inline tm getLocalTime() noexcept {
 		time_t now = time(nullptr);
 		tm result;
 		if (localtime_s(&result, &now)) return {};
@@ -104,7 +104,7 @@ private:
 #endif
 
 	// 规范化 logger 名称
-	static inline std::wstring legalizeLoggerName(const std::wstring& name) {
+	static inline std::wstring legalizeLoggerName(const std::wstring& name) noexcept {
 		// 查找最后一个回车符或换行符
 #ifdef max
 		intptr_t lastPos = max((intptr_t)name.find_last_of(L'\r'), (intptr_t)name.find_last_of(L'\n'));
@@ -116,7 +116,7 @@ private:
 	}
 
 	// 获取当前文字属性
-	static inline WORD getTextAttribute() {
+	static inline WORD getTextAttribute() noexcept {
 		CONSOLE_SCREEN_BUFFER_INFO buffer;
 		if (!GetConsoleScreenBufferInfo(hStderr, &buffer)) return FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_RED;
 		return buffer.wAttributes;
@@ -139,7 +139,7 @@ private:
 	}
 
 	// 输出信息 (字符串)
-	static inline void write(const std::string& msg) {
+	static inline void write(const std::string& msg) noexcept {
 		WriteFile(hStderr, msg.c_str(), (DWORD)msg.length(), nullptr, nullptr);
 #ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
 		if (hLogFile != INVALID_HANDLE_VALUE) WriteFile(hLogFile, msg.c_str(), (DWORD)msg.length(), nullptr, nullptr);
@@ -182,7 +182,7 @@ private:
 	}
 
 	// 输出时间
-	static inline void printTime(const std::wstring& name, const std::string& level, WORD levelColor, WORD textColor) {
+	static inline void printTime(const std::wstring& name, const std::string& level, WORD levelColor, WORD textColor) noexcept {
 		tm localTime = getLocalTime();
 		WriteFile(hStderr, "\r", 1, nullptr, nullptr);
 		SetConsoleTextAttribute(hStderr, FOREGROUND_BLUE | FOREGROUND_GREEN);
@@ -253,19 +253,19 @@ private:
 
 public:
 	// 创建无名 logger
-	KlyLogger() : as_string("KlyLogger{name=<empty>}"), as_wstring(L"KlyLogger{name=<empty>}") {};
+	KlyLogger() noexcept : as_string("KlyLogger{name=<empty>}"), as_wstring(L"KlyLogger{name=<empty>}") {};
 
 	// 以宽字符串类型的字符串作为名称创建 logger
-	explicit KlyLogger(const std::wstring& name) : _name(legalizeLoggerName(name)), as_wstring(std::wstring(L"KlyLogger{name=") + (_name.empty() ? L"<empty>" : _name) + L'}'), as_string(simpleString(CP_ACP, as_wstring)) {}
+	explicit KlyLogger(const std::wstring& name) noexcept : _name(legalizeLoggerName(name)), as_wstring(std::wstring(L"KlyLogger{name=") + (_name.empty() ? L"<empty>" : _name) + L'}'), as_string(simpleString(CP_ACP, as_wstring)) {}
 
 	// 以普通字符串类型的字符串作为名称创建 logger
-	explicit KlyLogger(const std::string& name) : _name(legalizeLoggerName(wideString(name))), as_wstring(std::wstring(L"KlyLogger{name=") + (_name.empty() ? L"<empty>" : _name) + L'}'), as_string(simpleString(CP_ACP, as_wstring)) {}
+	explicit KlyLogger(const std::string& name) noexcept : _name(legalizeLoggerName(wideString(name))), as_wstring(std::wstring(L"KlyLogger{name=") + (_name.empty() ? L"<empty>" : _name) + L'}'), as_string(simpleString(CP_ACP, as_wstring)) {}
 
 	// 转为字符串
-	inline std::string to_string() const { return as_string; }
+	inline std::string to_string() const noexcept { return as_string; }
 	
 	// 转为宽字符串
-	inline std::wstring to_wstring() const { return as_wstring; }
+	inline std::wstring to_wstring() const noexcept { return as_wstring; }
 
 	// 输出普通信息 (宽字符串)
 	template<typename... Args>
@@ -300,10 +300,10 @@ public:
 	inline void fatal(const std::string& message, const Args&... args) const { fatal(wideString(message), args...); }
 
 	// 判断是否完成所有日志输出任务
-	static inline bool finishedTasks() { return logQueue.empty(); }
+	static inline bool finishedTasks() noexcept { return logQueue.empty(); }
 
 	// 等待日志输出完毕
-	static inline void wait() { while (!finishedTasks()) Sleep(1); }
+	static inline void wait() noexcept { while (!finishedTasks()) Sleep(1); }
 
 	// 设置输出后行为
 	static inline void onLog(const std::function<void()>& func) { fOnLog = func; }
