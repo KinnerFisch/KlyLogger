@@ -25,8 +25,10 @@ private:
 	};
 
 	static inline HANDLE hStderr = GetStdHandle(STD_ERROR_HANDLE); // 标准错误输出句柄
+	static inline std::queue<std::wstring> convertArgsStorage; // 消息格式化参数缓存区
 	static inline std::function<void()> fOnLog = nullptr; // 输出日志后任务
 	static inline std::queue<LogTask> logQueue; // 任务队列
+
 	static int iStartWorkerThread; // 启动线程
 
 	std::wstring _name, as_wstring; // 名称及转宽字符串缓存
@@ -150,7 +152,7 @@ private:
 	static inline void write(std::wstring msg, WORD initialColor) {
 		while (msg.back() == L'§') msg.pop_back();
 		size_t pos;
-		while ((pos = msg.find(L'§')) != std::string::npos) {
+		while ((pos = msg.find(L'§')) != std::wstring::npos) {
 			write(msg.substr(0, pos), initialColor);
 			wchar_t code = msg[pos + 1];
 			if (code == L'0') SetConsoleTextAttribute(hStderr, 0);
@@ -206,9 +208,9 @@ private:
 	static inline void logMessage(const std::wstring& name, std::wstring message, const std::string& level, WORD levelColor, WORD textColor) {
 		size_t newlinePos;
 #ifdef min
-		while ((newlinePos = min(message.find(L'\r'), message.find(L'\n'))) != std::wstring::npos) {
+		while ((newlinePos = min(message.find(L'\r'), message.find(L'\n'))) != std::string::npos) {
 #else
-		while ((newlinePos = std::min(message.find(L'\r'), message.find(L'\n'))) != std::wstring::npos) {
+		while ((newlinePos = std::min(message.find(L'\r'), message.find(L'\n'))) != std::string::npos) {
 #endif
 			logMessage(name, message.substr(0, newlinePos), level, levelColor, textColor);
 			message = message.substr(newlinePos + 1);
@@ -223,16 +225,16 @@ private:
 
 	// 预处理消息参数: 将普通字符串转为宽字符串
 	template<typename T>
-	static inline auto& processFormattings(const T& arg) {
+	static inline auto& convertFormattings(const T& arg) {
 		if constexpr (std::is_same_v<T, std::string> || std::is_convertible_v<T, const char*>) {
-			const static std::wstring& result = wideString(arg);
-			return result;
+			convertArgsStorage.push(wideString(arg));
+			return convertArgsStorage.back();
 		} else if constexpr (has_to_wstring<T>::value) {
-			const static std::wstring& result = arg.to_wstring();
-			return result;
+			convertArgsStorage.push(arg.to_wstring());
+			return convertArgsStorage.back();
 		} else if constexpr (has_to_string<T>::value) {
-			const static std::wstring& result = wideString(arg.to_string());
-			return result;
+			convertArgsStorage.push(wideString(arg.to_string()));
+			return convertArgsStorage.back();
 		} else return arg;
 	}
 
@@ -244,7 +246,8 @@ private:
 #endif
 		std::wstring formatted;
 		try {
-			formatted = std::vformat(message, std::make_wformat_args(processFormattings(args)...));
+			formatted = std::vformat(message, std::make_wformat_args(convertFormattings(args)...));
+			convertArgsStorage = std::queue<std::wstring>();
 		} catch (const std::exception& e) {
 			formatted = wideString(e.what());
 		} catch (...) {}
