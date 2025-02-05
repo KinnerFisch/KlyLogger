@@ -24,9 +24,10 @@ private:
 		WORD levelColor, textColor;
 	};
 
-	static inline HANDLE hStderr = GetStdHandle(STD_ERROR_HANDLE); // 标准错误输出句柄
+	static inline HANDLE hStderr = GetStdHandle(STD_ERROR_HANDLE); // 标准错误流输出句柄
 	static inline std::queue<std::wstring> convertArgsStorage; // 消息格式化参数缓存区
 	static inline std::function<void()> fOnLog = nullptr; // 输出日志后任务
+	static inline CONSOLE_SCREEN_BUFFER_INFO csbi; // 窗口信息
 	static inline std::queue<LogTask> logQueue; // 任务队列
 
 	static int iStartWorkerThread; // 启动线程
@@ -119,16 +120,15 @@ private:
 
 	// 获取当前文字属性
 	static inline WORD getTextAttribute() noexcept {
-		CONSOLE_SCREEN_BUFFER_INFO buffer;
-		if (!GetConsoleScreenBufferInfo(hStderr, &buffer)) return FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_RED;
-		return buffer.wAttributes;
+		if (!GetConsoleScreenBufferInfo(hStderr, &csbi)) return FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_RED;
+		return csbi.wAttributes;
 	}
 
 	// 启动 logger 专用线程
 	static inline int startWorkerThread() {
 		std::thread([]() {
 			while (true) {
-				while (finishedTasks());
+				if (finishedTasks()) continue;
 				LogTask task = logQueue.front();
 				logMessage(task.name, task.message, task.level, task.levelColor, task.textColor);
 				try {
@@ -208,9 +208,9 @@ private:
 	static inline void logMessage(const std::wstring& name, std::wstring message, const std::string& level, WORD levelColor, WORD textColor) {
 		size_t newlinePos;
 #ifdef min
-		while ((newlinePos = min(message.find(L'\r'), message.find(L'\n'))) != std::string::npos) {
+		while ((newlinePos = min(message.find(L'\r'), message.find(L'\n'))) != std::wstring::npos) {
 #else
-		while ((newlinePos = std::min(message.find(L'\r'), message.find(L'\n'))) != std::string::npos) {
+		while ((newlinePos = std::min(message.find(L'\r'), message.find(L'\n'))) != std::wstring::npos) {
 #endif
 			logMessage(name, message.substr(0, newlinePos), level, levelColor, textColor);
 			message = message.substr(newlinePos + 1);
@@ -219,6 +219,9 @@ private:
 			printTime(name, level, levelColor, textColor);
 			write(message.substr(message.find_last_of(L'\r') + 1), textColor);
 			SetConsoleTextAttribute(hStderr, FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_RED);
+			GetConsoleScreenBufferInfo(hStderr, &csbi);
+			int length = csbi.dwSize.X - csbi.dwCursorPosition.X;
+			for (int i = 0; i < length; ++i) WriteFile(hStderr, " ", 1, nullptr, nullptr);
 			write("\n");
 		}
 	}
