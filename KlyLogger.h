@@ -1,318 +1,444 @@
+#ifndef KLY_LOGGER_INCLUDED
 #define KLY_LOGGER_INCLUDED
+#include <filesystem>
 #include <functional>
-#include <Windows.h>
+#include <iostream>
+#include <codecvt>
+#include <fstream>
 #include <format>
 #include <thread>
 #include <queue>
 
-// 检测转字符串成员函数
-template <typename T, typename = void>
-struct has_to_string : std::false_type {};
-template <typename T>
-struct has_to_string<T, std::void_t<decltype(std::declval<T>().to_string())>> : std::true_type {};
-template <typename T, typename = void>
-struct has_to_wstring : std::false_type {};
-template <typename T>
-struct has_to_wstring<T, std::void_t<decltype(std::declval<T>().to_wstring())>> : std::true_type {};
+#ifdef _WIN32
+#include <io.h>
+#include <Windows.h>
+#define isatty _isatty
+#define fileno _fileno
+#ifndef KLY_LOGGER_DISABLE_EXTERN_RTL_GET_VERSION
+#pragma comment(lib, "ntdll.lib")
+extern "C" int RtlGetVersion(PRTL_OSVERSIONINFOEXW) noexcept;
+#endif
+#else
+#include <memory>
+#include <unistd.h>
+#include <sys/stat.h>
+#define FOREGROUND_BLUE          0x0001
+#define FOREGROUND_GREEN         0x0002
+#define FOREGROUND_RED           0x0004
+#define FOREGROUND_INTENSITY     0x0008
+#define COMMON_LVB_REVERSE_VIDEO 0x4000
+#define COMMON_LVB_UNDERSCORE    0x8000
+#endif
 
-// KlyLogger: 轻量、直观、易用的 logger
+template <typename T, typename = void>
+struct has_string : std::false_type {};
+template <typename T>
+struct has_string<T, std::void_t<decltype(std::declval<T>().string())>> : std::true_type {};
+template <typename T, typename = void>
+struct has_wstring : std::false_type {};
+template <typename T>
+struct has_wstring<T, std::void_t<decltype(std::declval<T>().wstring())>> : std::true_type {};
+
+// KlyLogger: lightweight, visually and easy-to-use logger.
 class KlyLogger {
 private:
-	struct LogTask { // 日志输出任务
+	struct LogTask {
 		std::wstring name, message;
-		std::string level;
-		WORD levelColor, textColor;
+		std::string level, levelAnsiColor, textAnsiColor;
+		unsigned short levelColor, textColor;
 	};
 
-	static inline HANDLE hStderr = GetStdHandle(STD_ERROR_HANDLE); // 标准错误流输出句柄
-	static inline std::queue<std::wstring> convertArgsStorage; // 消息格式化参数缓存区
-	static inline std::function<void()> fOnLog = nullptr; // 输出日志后任务
-	static inline CONSOLE_SCREEN_BUFFER_INFO csbi; // 窗口信息
-	static inline std::queue<LogTask> logQueue; // 任务队列
+	static inline std::queue<LogTask> logQueue;
+	static inline std::function<void()> fOnLog = nullptr;
+	static inline bool isAtty = isatty(fileno(stderr));
+	static inline std::queue<std::wstring> convertArgsStorage;
+	static inline std::wstring_convert<std::codecvt_utf8<wchar_t>> converter;
+	static inline std::chrono::milliseconds _1ms = std::chrono::milliseconds(1);
 
-	static int iStartWorkerThread; // 启动线程
+#ifdef _WIN32
+	static inline HANDLE hStderr = GetStdHandle(STD_ERROR_HANDLE);
 
-	std::wstring _name, as_wstring; // 名称及转宽字符串缓存
-	std::string as_string; // 转字符串缓存
-
-	// 系统默认编码字符串转宽字符串
-	static inline std::wstring wideString(const std::string& src) noexcept {
-		int len = MultiByteToWideChar(CP_ACP, 0, src.c_str(), -1, nullptr, 0); // 获取原字符串在系统默认编码下的字符数
-		std::wstring str(len - 1, 0); // 开辟长度为原字符串长度的宽字符串
-		MultiByteToWideChar(CP_ACP, 0, src.c_str(), -1, str.data(), len); // 将原字符串转为宽字符串
-		return str;
+	static inline bool isAnsiSupported() noexcept {
+		if (!isAtty) return false;
+		RTL_OSVERSIONINFOEXW osInfo = {};
+		osInfo.dwOSVersionInfoSize = sizeof(osInfo);
+		if (RtlGetVersion(&osInfo) || osInfo.dwMajorVersion < 10) return false;
+		unsigned long mode = 0;
+		if (GetConsoleMode(hStderr, &mode)) {
+			SetConsoleMode(hStderr, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+			return true;
+		} else return false;
 	}
 
-	// 宽字符串转特定编码字符串
-	static inline std::string simpleString(unsigned codepage, const std::wstring& src) noexcept {
-		int len = WideCharToMultiByte(codepage, 0, src.c_str(), -1, nullptr, 0, nullptr, nullptr); // 获取原字符串在系统默认编码下的字符数
-		std::string str(len - 1, 0); // 开辟长度为原字符串长度的宽字符串
-		WideCharToMultiByte(codepage, 0, src.c_str(), -1, str.data(), len, nullptr, nullptr); // 将原字符串转为宽字符串
-		return str; // 返回新宽字符串
+	static inline bool ansiSupported = isAnsiSupported();
+	static inline CONSOLE_SCREEN_BUFFER_INFO csbi;
+#else
+	static inline bool ansiSupported = true;
+#endif
+
+	static inline unsigned short getTextAttribute() noexcept {
+#ifdef _WIN32
+		return GetConsoleScreenBufferInfo(hStderr, &csbi) ? csbi.wAttributes : FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_RED;
+#else
+		return 0;
+#endif
 	}
 
-	// 获取当前时间
+	static bool iStartWorkerThread;
+
+	std::wstring name, as_wstring;
+	std::string as_string;
+
 	static inline tm getLocalTime() noexcept {
 		time_t now = time(nullptr);
-		tm result;
-		if (localtime_s(&result, &now)) return {};
+		tm result {};
+#ifdef _WIN32
+		localtime_s(&result, &now);
+#else
+		localtime_r(&now, &result);
+#endif
 		return result;
 	}
 
-#ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
-	// 获取当前日志文件句柄
-	static inline HANDLE getLogFileHandle() {
-		if (logsDirectory.empty() || latestLog.empty()) {
-			char path[1024];
-			GetCurrentDirectoryA(1024, path);
-			logsDirectory = std::string(path) + "\\logs\\";
-			latestLog = logsDirectory + "latest.log";
+	static inline std::wstring convertToWString(const std::string& str) noexcept {
+#ifdef _WIN32
+		int len = MultiByteToWideChar(CP_ACP, MB_ERR_INVALID_CHARS, str.c_str(), -1, nullptr, 0);
+		if (len--) {
+			std::wstring result(len, 0);
+			MultiByteToWideChar(CP_ACP, MB_ERR_INVALID_CHARS, str.c_str(), -1, result.data(), len);
+			return result;
 		}
-		if (!CreateDirectoryA(logsDirectory.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS) return INVALID_HANDLE_VALUE; // 无法创建文件夹
-		DWORD attributes = GetFileAttributesA(latestLog.c_str());
-		if (attributes != INVALID_FILE_ATTRIBUTES) {
-			HANDLE hExistingFile = CreateFileA(latestLog.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-			bool gotTime = false;
-			FILETIME ftCreate, ftAccess, ftWrite;
-			if (hExistingFile != INVALID_HANDLE_VALUE) {
-				gotTime = GetFileTime(hExistingFile, &ftCreate, &ftAccess, &ftWrite);
-				CloseHandle(hExistingFile);
-			}
-			SYSTEMTIME stUTC, stLocal;
-			if (gotTime) {
-				FileTimeToSystemTime(&ftWrite, &stUTC);
-				SystemTimeToTzSpecificLocalTime(nullptr, &stUTC, &stLocal);
-			} else GetLocalTime(&stLocal);
-			unsigned i = 0;
-			while (true) if (MoveFileA(latestLog.c_str(), std::format("{}{:04}-{:-2}-{:-2}-{}.log", logsDirectory, stLocal.wYear, stLocal.wMonth, stLocal.wDay, ++i).c_str())) break;
+#endif
+		try {
+			return converter.from_bytes(str);
+		} catch (...) {
+			return { str.begin(), str.end() };
 		}
-		tm time = getLocalTime();
-		logFileCreateDate = (time.tm_year << 16) + (time.tm_mon << 8) + time.tm_mday;
-		return CreateFileA(latestLog.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
 	}
 
-	static inline unsigned logFileCreateDate = 0; // 日志文件创建时间
-	static inline HANDLE hLogFile = getLogFileHandle(); // 日志文件句柄
-	static inline std::string logsDirectory, latestLog; // 日志文件目录及最新日志文件地址
+	static inline void setConsoleColor(unsigned color, const std::string& ansi) {
+		if (!isAtty) return;
+#ifdef _WIN32
+		if (ansiSupported) std::cerr << ansi;
+		else SetConsoleTextAttribute(hStderr, color);
+#else
+		std::cerr << ansi;
+#endif
+	}
 
-	// 更新日志文件句柄
-	static inline void updateLogFileHandle() {
+#ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
+	static inline std::ofstream getLogFileHandle() noexcept {
+		try {
+#ifdef _WIN32
+			char path[5120];
+			GetModuleFileNameA(nullptr, path, 5120);
+#else
+			char path[5120];
+			ssize_t len = readlink("/proc/self/exe", path, sizeof(path) - 1);
+			if (len == -1) return std::ofstream();
+			path[len] = '\0';
+#endif
+			if (logsDirectory.empty() || latestLog.empty()) {
+				logsDirectory = std::filesystem::path(path).parent_path().string() + "/logs/";
+				latestLog = logsDirectory + "latest.log";
+			}
+			std::filesystem::create_directories(logsDirectory);
+			tm time = getLocalTime();
+			if (std::filesystem::exists(latestLog)) {
+				tm fileTime {};
+				struct stat fileStat {};
+				if (stat(latestLog.c_str(), &fileStat)) fileTime = time;
+#ifdef _WIN32
+				else localtime_s(&fileTime, &fileStat.st_mtime);
+#else
+				else localtime_r(&fileStat.st_mtime, &fileTime);
+#endif
+				unsigned i = 0;
+				while (std::filesystem::exists(std::format("{}{:04}-{:02}-{:02}-{}.log", logsDirectory, fileTime.tm_year + 1900, fileTime.tm_mon + 1, fileTime.tm_mday, ++i)));
+				std::filesystem::rename(latestLog, std::format("{}{:04}-{:02}-{:02}-{}.log", logsDirectory, fileTime.tm_year + 1900, fileTime.tm_mon + 1, fileTime.tm_mday, i));
+			}
+			logFileCreateDate = (time.tm_year << 16) + (time.tm_mon << 8) + time.tm_mday;
+			return std::ofstream(latestLog, std::ios::out | std::ios::trunc | std::ios::binary);
+		} catch (...) {
+			return {};
+		}
+	}
+
+	static inline unsigned logFileCreateDate = 0;
+	static inline std::ofstream logFile = getLogFileHandle();
+	static inline std::string logsDirectory, latestLog;
+
+	static inline void updateLogFileHandle() noexcept {
 		tm time = getLocalTime();
 		unsigned date = (time.tm_year << 16) + (time.tm_mon << 8) + time.tm_mday;
 		if (date != logFileCreateDate) {
-			CloseHandle(hLogFile);
-			hLogFile = getLogFileHandle();
+			if (logFile.is_open()) logFile.close();
+			logFile = getLogFileHandle();
 		}
 	}
 #endif
 
-	// 规范化 logger 名称
 	static inline std::wstring legalizeLoggerName(const std::wstring& name) noexcept {
-		// 查找最后一个回车符或换行符
 #ifdef max
 		intptr_t lastPos = max((intptr_t)name.find_last_of(L'\r'), (intptr_t)name.find_last_of(L'\n'));
 #else
 		intptr_t lastPos = std::max((intptr_t)name.find_last_of(L'\r'), (intptr_t)name.find_last_of(L'\n'));
 #endif
-		// 截取回车或换行符右侧的字符串
 		return lastPos != std::wstring::npos ? name.substr(lastPos + 1) : name;
 	}
 
-	// 获取当前文字属性
-	static inline WORD getTextAttribute() noexcept {
-		if (!GetConsoleScreenBufferInfo(hStderr, &csbi)) return FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_RED;
-		return csbi.wAttributes;
-	}
-
-	// 启动 logger 专用线程
-	static inline int startWorkerThread() {
+	static inline bool startWorkerThread() noexcept {
+		static std::shared_ptr<void> ptr(nullptr, [](void*) { wait(); });
 		std::thread([]() {
 			while (true) {
 				if (finishedTasks()) continue;
 				LogTask task = logQueue.front();
-				logMessage(task.name, task.message, task.level, task.levelColor, task.textColor);
+				logMessage(task.name, task.message, task.level, task.levelColor, task.levelAnsiColor, task.textColor, task.textAnsiColor);
 				try {
 					if (fOnLog) fOnLog();
 				} catch (...) {}
 				logQueue.pop();
 			}
 		}).detach();
-		return 0;
+		return true;
 	}
 
-	// 输出信息 (字符串)
 	static inline void write(const std::string& msg) noexcept {
-		WriteFile(hStderr, msg.c_str(), (DWORD)msg.length(), nullptr, nullptr);
+		if (isAtty) std::cerr << msg;
 #ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
-		if (hLogFile != INVALID_HANDLE_VALUE) WriteFile(hLogFile, msg.c_str(), (DWORD)msg.length(), nullptr, nullptr);
+		if (logFile.is_open()) logFile << msg;
 #endif
 	}
 
-	// 输出信息 (宽字符串)
-	static inline void write(std::wstring msg, WORD initialColor) {
-		while (msg.back() == L'§') msg.pop_back();
+	static inline void write(std::wstring msg, unsigned short initialColor, const std::string& ansiColor) noexcept {
+		while (msg.back() == L'\247') msg.pop_back();
 		size_t pos;
-		while ((pos = msg.find(L'§')) != std::wstring::npos) {
-			write(msg.substr(0, pos), initialColor);
-			wchar_t code = msg[pos + 1];
-			if (code == L'0') SetConsoleTextAttribute(hStderr, 0);
-			else if (code == L'1') SetConsoleTextAttribute(hStderr, FOREGROUND_BLUE);
-			else if (code == L'2') SetConsoleTextAttribute(hStderr, FOREGROUND_GREEN);
-			else if (code == L'3') SetConsoleTextAttribute(hStderr, FOREGROUND_BLUE | FOREGROUND_GREEN);
-			else if (code == L'4') SetConsoleTextAttribute(hStderr, FOREGROUND_RED);
-			else if (code == L'5') SetConsoleTextAttribute(hStderr, FOREGROUND_BLUE | FOREGROUND_RED);
-			else if (code == L'6') SetConsoleTextAttribute(hStderr, FOREGROUND_GREEN | FOREGROUND_RED);
-			else if (code == L'7') SetConsoleTextAttribute(hStderr, FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_RED);
-			else if (code == L'8') SetConsoleTextAttribute(hStderr, FOREGROUND_INTENSITY);
-			else if (code == L'9') SetConsoleTextAttribute(hStderr, FOREGROUND_BLUE | FOREGROUND_INTENSITY);
-			else if (code == L'a') SetConsoleTextAttribute(hStderr, FOREGROUND_GREEN | FOREGROUND_INTENSITY);
-			else if (code == L'b') SetConsoleTextAttribute(hStderr, FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_INTENSITY);
-			else if (code == L'c') SetConsoleTextAttribute(hStderr, FOREGROUND_RED | FOREGROUND_INTENSITY);
-			else if (code == L'd') SetConsoleTextAttribute(hStderr, FOREGROUND_BLUE | FOREGROUND_RED | FOREGROUND_INTENSITY);
-			else if (code == L'e') SetConsoleTextAttribute(hStderr, FOREGROUND_GREEN | FOREGROUND_RED | FOREGROUND_INTENSITY);
-			else if (code == L'f') SetConsoleTextAttribute(hStderr, FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_RED | FOREGROUND_INTENSITY);
-			else if (code == L'k') SetConsoleTextAttribute(hStderr, getTextAttribute() | COMMON_LVB_REVERSE_VIDEO);
-			else if (code == L'n') SetConsoleTextAttribute(hStderr, getTextAttribute() | COMMON_LVB_UNDERSCORE);
-			else if (code == L'r') SetConsoleTextAttribute(hStderr, initialColor);
+		while ((pos = msg.find(L'\247')) != std::wstring::npos) {
+			write(msg.substr(0, pos), initialColor, ansiColor);
+			if (isAtty) {
+				switch (msg[pos + 1]) {
+					case L'0':
+						setConsoleColor(0, "\33[30m");
+						break;
+					case L'1':
+						setConsoleColor(FOREGROUND_BLUE, "\33[0;34m");
+						break;
+					case L'2':
+						setConsoleColor(FOREGROUND_GREEN, "\33[0;32m");
+						break;
+					case L'3':
+						setConsoleColor(FOREGROUND_BLUE | FOREGROUND_GREEN, "\33[0;36m");
+						break;
+					case L'4':
+						setConsoleColor(FOREGROUND_RED, "\33[0;31m");
+						break;
+					case L'5':
+						setConsoleColor(FOREGROUND_BLUE | FOREGROUND_RED, "\33[0;35m");
+						break;
+					case L'6':
+						setConsoleColor(FOREGROUND_GREEN | FOREGROUND_RED, "\33[0;33m");
+						break;
+					case L'7':
+						setConsoleColor(FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_RED, "\33[0;37m");
+						break;
+					case L'8':
+						setConsoleColor(FOREGROUND_INTENSITY, "\33[0;90m");
+						break;
+					case L'9':
+						setConsoleColor(FOREGROUND_BLUE | FOREGROUND_INTENSITY, "\33[0;94m");
+						break;
+					case L'a':
+						setConsoleColor(FOREGROUND_GREEN | FOREGROUND_INTENSITY, "\33[0;92m");
+						break;
+					case L'b':
+						setConsoleColor(FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_INTENSITY, "\33[0;96m");
+						break;
+					case L'c':
+						setConsoleColor(FOREGROUND_RED | FOREGROUND_INTENSITY, "\33[0;91m");
+						break;
+					case L'd':
+						setConsoleColor(FOREGROUND_BLUE | FOREGROUND_RED | FOREGROUND_INTENSITY, "\33[0;95m");
+						break;
+					case L'e':
+						setConsoleColor(FOREGROUND_GREEN | FOREGROUND_RED | FOREGROUND_INTENSITY, "\33[0;93m");
+						break;
+					case L'f':
+						setConsoleColor(FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_RED | FOREGROUND_INTENSITY, "\33[0;97m");
+						break;
+					case L'r':
+						setConsoleColor(initialColor, ansiColor);
+						break;
+					case L'k':
+						setConsoleColor(getTextAttribute() | COMMON_LVB_REVERSE_VIDEO, "\33[5m");
+						break;
+					case L'l':
+						if (ansiSupported) std::cerr << "\33[21m";
+						break;
+					case L'm':
+						if (ansiSupported) std::cerr << "\33[9m";
+						break;
+					case L'n':
+						setConsoleColor(getTextAttribute() | COMMON_LVB_UNDERSCORE, "\33[4m");
+						break;
+					case L'o':
+						if (ansiSupported) std::cerr << "\33[3m";
+				}
+			}
 			msg = msg.substr(pos + 2);
 		}
-		WriteConsoleW(hStderr, msg.c_str(), (DWORD)msg.length(), nullptr, nullptr);
+		if (isAtty) {
+#ifdef _WIN32
+			std::cerr << std::flush;
+			WriteConsoleW(hStderr, msg.c_str(), (unsigned)msg.length(), nullptr, nullptr);
+#else
+			std::cerr << converter.to_bytes(msg);
+#endif
+		}
 #ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
-		std::string utf8 = simpleString(CP_UTF8, msg);
-		if (hLogFile != INVALID_HANDLE_VALUE) WriteFile(hLogFile, utf8.c_str(), (DWORD)utf8.length(), nullptr, nullptr);
+		if (logFile.is_open()) logFile << converter.to_bytes(msg);
 #endif
 	}
 
-	// 输出时间
-	static inline void printTime(const std::wstring& name, const std::string& level, WORD levelColor, WORD textColor) noexcept {
+	static inline void printTime(const std::wstring& name, const std::string& level, unsigned short levelColor, const std::string& levelAnsiColor, unsigned short textColor, const std::string& textAnsiColor) noexcept {
 		tm localTime = getLocalTime();
-		WriteFile(hStderr, "\r", 1, nullptr, nullptr);
-		SetConsoleTextAttribute(hStderr, FOREGROUND_BLUE | FOREGROUND_GREEN);
+		if (isAtty) {
+			std::cerr << '\r';
+			setConsoleColor(FOREGROUND_BLUE | FOREGROUND_GREEN, "\33[0;36m");
+		}
 		write("[");
-		SetConsoleTextAttribute(hStderr, FOREGROUND_BLUE | FOREGROUND_INTENSITY);
+		setConsoleColor(FOREGROUND_BLUE | FOREGROUND_GREEN, "\33[0;36m");
 		write(std::format("{:02}:{:02}:{:02} ", localTime.tm_hour, localTime.tm_min, localTime.tm_sec));
-		SetConsoleTextAttribute(hStderr, levelColor);
+		setConsoleColor(levelColor , levelAnsiColor);
 		write(level);
-		SetConsoleTextAttribute(hStderr, FOREGROUND_BLUE | FOREGROUND_GREEN);
+		setConsoleColor(FOREGROUND_BLUE | FOREGROUND_GREEN, "\33[0;36m");
 		write("] ");
 		if (!name.empty()) {
 			write("[");
-			write(name, FOREGROUND_BLUE | FOREGROUND_GREEN);
-			SetConsoleTextAttribute(hStderr, FOREGROUND_BLUE | FOREGROUND_GREEN);
+			write(name, FOREGROUND_BLUE | FOREGROUND_GREEN, "\33[0;36m");
+			setConsoleColor(FOREGROUND_BLUE | FOREGROUND_GREEN, "\33[0;36m");
 			write("] ");
 		}
-		SetConsoleTextAttribute(hStderr, textColor);
+		setConsoleColor(textColor, textAnsiColor);
 	}
 
-	// 输出日志信息
-	static inline void logMessage(const std::wstring& name, std::wstring message, const std::string& level, WORD levelColor, WORD textColor) {
+	static inline void logMessage(const std::wstring& name, std::wstring message, const std::string& level, unsigned short levelColor, const std::string& levelAnsiColor, unsigned short textColor, const std::string& textAnsiColor) noexcept {
 		size_t newlinePos;
 #ifdef min
 		while ((newlinePos = min(message.find(L'\r'), message.find(L'\n'))) != std::wstring::npos) {
 #else
 		while ((newlinePos = std::min(message.find(L'\r'), message.find(L'\n'))) != std::wstring::npos) {
 #endif
-			logMessage(name, message.substr(0, newlinePos), level, levelColor, textColor);
+			logMessage(name, message.substr(0, newlinePos), level, levelColor, levelAnsiColor, textColor, textAnsiColor);
 			message = message.substr(newlinePos + 1);
 		}
-		if (message[0]) { // 确保消息不是空字符串
-			printTime(name, level, levelColor, textColor);
-			write(message.substr(message.find_last_of(L'\r') + 1), textColor);
-			SetConsoleTextAttribute(hStderr, FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_RED);
-			GetConsoleScreenBufferInfo(hStderr, &csbi);
-			int length = csbi.dwSize.X - csbi.dwCursorPosition.X;
-			for (int i = 0; i < length; ++i) WriteFile(hStderr, " ", 1, nullptr, nullptr);
+		if (message[0]) {
+			printTime(name, level, levelColor, levelAnsiColor, textColor, textAnsiColor);
+			write(message.substr(message.find_last_of(L'\r') + 1), textColor, textAnsiColor);
+			if (isAtty) {
+				if (ansiSupported) std::cerr << "\33[m\33[K";
+#ifdef _WIN32
+				else {
+					SetConsoleTextAttribute(hStderr, FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_RED);
+					GetConsoleScreenBufferInfo(hStderr, &csbi);
+					unsigned long length = csbi.dwSize.X - csbi.dwCursorPosition.X;
+					FillConsoleOutputCharacterA(hStderr, ' ', length, csbi.dwCursorPosition, &length);
+					FillConsoleOutputAttribute(hStderr, csbi.wAttributes, length, csbi.dwCursorPosition, &length);
+				}
+#endif
+			}
 			write("\n");
+#ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
+			if (logFile.is_open()) logFile << std::flush;
+#endif
 		}
 	}
 
-	// 预处理消息参数: 将普通字符串转为宽字符串
 	template<typename T>
-	static inline auto& convertFormattings(const T& arg) {
+	static inline auto& convertFormatting(const T& arg) {
 		if constexpr (std::is_same_v<T, std::string> || std::is_convertible_v<T, const char*>) {
-			convertArgsStorage.push(wideString(arg));
+			convertArgsStorage.push(convertToWString(arg));
 			return convertArgsStorage.back();
-		} else if constexpr (has_to_wstring<T>::value) {
-			convertArgsStorage.push(arg.to_wstring());
+		} else if constexpr (has_wstring<T>::value) {
+			convertArgsStorage.push(arg.wstring());
 			return convertArgsStorage.back();
-		} else if constexpr (has_to_string<T>::value) {
-			convertArgsStorage.push(wideString(arg.to_string()));
+		} else if constexpr (has_string<T>::value) {
+			convertArgsStorage.push(convertToWString(arg.string()));
 			return convertArgsStorage.back();
 		} else return arg;
 	}
 
-	// 添加日志任务
 	template<typename... Args>
-	inline void pushTask(const std::wstring& message, const std::string& level, WORD levelColor, WORD textColor, const Args&... args) const {
+	inline void pushTask(const std::wstring& message, const std::string& level, unsigned short levelColor, const std::string& levelAnsiColor, unsigned short textColor, const std::string& textAnsiColor, const Args&... args) const noexcept {
 #ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
 		updateLogFileHandle();
 #endif
 		std::wstring formatted;
 		try {
-			formatted = std::vformat(message, std::make_wformat_args(convertFormattings(args)...));
+			formatted = std::vformat(message, std::make_wformat_args(convertFormatting(args)...));
 			convertArgsStorage = std::queue<std::wstring>();
 		} catch (const std::exception& e) {
-			formatted = wideString(e.what());
+			formatted = message + L"\2478\247o (" + convertToWString(e.what()) + L')';
 		} catch (...) {}
-		logQueue.push({ _name, formatted, level, levelColor, textColor });
+		logQueue.push({ name, formatted, level, levelAnsiColor, textAnsiColor, levelColor, textColor });
 	}
 
 public:
-	// 创建无名 logger
+	// Create a nameless logger.
 	KlyLogger() noexcept : as_string("KlyLogger{name=<empty>}"), as_wstring(L"KlyLogger{name=<empty>}") {};
 
-	// 以宽字符串类型的字符串作为名称创建 logger
-	explicit KlyLogger(const std::wstring& name) noexcept : _name(legalizeLoggerName(name)), as_wstring(std::wstring(L"KlyLogger{name=") + (_name.empty() ? L"<empty>" : _name) + L'}'), as_string(simpleString(CP_ACP, as_wstring)) {}
+	// Get as std::string
+	[[nodiscard]] inline std::string string() const noexcept { return as_string; }
 
-	// 以普通字符串类型的字符串作为名称创建 logger
-	explicit KlyLogger(const std::string& name) noexcept : _name(legalizeLoggerName(wideString(name))), as_wstring(std::wstring(L"KlyLogger{name=") + (_name.empty() ? L"<empty>" : _name) + L'}'), as_string(simpleString(CP_ACP, as_wstring)) {}
+	// Get as std::wstring
+	[[nodiscard]] inline std::wstring wstring() const noexcept { return as_wstring; }
 
-	// 转为字符串
-	inline std::string to_string() const noexcept { return as_string; }
-	
-	// 转为宽字符串
-	inline std::wstring to_wstring() const noexcept { return as_wstring; }
+	// Create a logger with std::wstring as its name.
+	explicit KlyLogger(const std::wstring& name) noexcept : name(legalizeLoggerName(name)), as_wstring(std::wstring(L"KlyLogger{name=") + (name.empty() ? L"<empty>" : name) + L'}'), as_string(converter.to_bytes(as_wstring)) {}
 
-	// 输出普通信息 (宽字符串)
+	// Create a logger with std::string as its name.
+	explicit KlyLogger(const std::string& name) noexcept : name(legalizeLoggerName(convertToWString(name))), as_wstring(std::wstring(L"KlyLogger{name=") + (name.empty() ? L"<empty>" : this->name) + L'}'), as_string(converter.to_bytes(as_wstring)) {}
+
+	// Log INFO with std::wstring.
 	template<typename... Args>
-	inline void info(const std::wstring& message, const Args&... args) const { pushTask(message, "INFO", FOREGROUND_GREEN | FOREGROUND_INTENSITY, FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_RED, args...); }
+	inline void info(const std::wstring& message, const Args&... args) const noexcept { pushTask(message, "INFO", FOREGROUND_GREEN | FOREGROUND_INTENSITY, "\33[0;92m", FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_RED, "\33[0;37m", args...); }
 
-	// 输出普通信息 (字符串)
+	// Log INFO with std::string.
 	template<typename... Args>
-	inline void info(const std::string& message, const Args&... args) const { info(wideString(message), args...); }
+	inline void info(const std::string& message, const Args&... args) const noexcept { info(convertToWString(message), args...); }
 
-	// 输出警告信息 (宽字符串)
+	// Log WARN with std::wstring.
 	template<typename... Args>
-	inline void warn(const std::wstring& message, const Args&... args) const { pushTask(message, "WARN", FOREGROUND_GREEN | FOREGROUND_RED, FOREGROUND_GREEN | FOREGROUND_RED | FOREGROUND_INTENSITY, args...); }
+	inline void warn(const std::wstring& message, const Args&... args) const noexcept { pushTask(message, "WARN", FOREGROUND_GREEN | FOREGROUND_RED, "\33[0;33m", FOREGROUND_GREEN | FOREGROUND_RED | FOREGROUND_INTENSITY, "\33[0;93m", args...); }
 
-	// 输出警告信息 (字符串)
+	// Log WARN with std::string.
 	template<typename... Args>
-	inline void warn(const std::string& message, const Args&... args) const { warn(wideString(message), args...); }
+	inline void warn(const std::string& message, const Args&... args) const noexcept { warn(convertToWString(message), args...); }
 
-	// 输出错误信息 (宽字符串)
+	// Log ERROR with std::wstring.
 	template<typename... Args>
-	inline void error(const std::wstring& message, const Args&... args) const { pushTask(message, "ERROR", FOREGROUND_RED, FOREGROUND_RED | FOREGROUND_INTENSITY, args...); }
+	inline void error(const std::wstring& message, const Args&... args) const noexcept { pushTask(message, "ERROR", FOREGROUND_RED, "\33[0;31m", FOREGROUND_RED | FOREGROUND_INTENSITY, "\33[0;91m", args...); }
 
-	// 输出错误信息 (字符串)
+	// Log ERROR with std::string.
 	template<typename... Args>
-	inline void error(const std::string& message, const Args&... args) const { error(wideString(message), args...); }
+	inline void error(const std::string& message, const Args&... args) const noexcept { error(convertToWString(message), args...); }
 
-	// 输出严重错误信息 (宽字符串)
+	// Log FATAL with std::wstring.
 	template<typename... Args>
-	inline void fatal(const std::wstring& message, const Args&... args) const { pushTask(message, "FATAL", COMMON_LVB_UNDERSCORE | FOREGROUND_RED, FOREGROUND_RED, args...); }
+	inline void fatal(const std::wstring& message, const Args&... args) const noexcept { pushTask(message, "FATAL", COMMON_LVB_UNDERSCORE | FOREGROUND_RED, "\33[2;31m", FOREGROUND_RED, "\33[0;31m", args...); }
 
-	// 输出严重错误信息 (字符串)
+	// Log FATAL with std::string.
 	template<typename... Args>
-	inline void fatal(const std::string& message, const Args&... args) const { fatal(wideString(message), args...); }
+	inline void fatal(const std::string& message, const Args&... args) const noexcept { fatal(convertToWString(message), args...); }
 
-	// 判断是否完成所有日志输出任务
+	// Determine whether all logging tasks have been completed.
 	static inline bool finishedTasks() noexcept { return logQueue.empty(); }
 
-	// 等待日志输出完毕
-	static inline void wait() noexcept { while (!finishedTasks()) Sleep(1); }
+	// Wait for log output to finish.
+	static inline void wait() noexcept { while (!finishedTasks()) std::this_thread::sleep_for(_1ms); }
 
-	// 设置输出后行为
-	static inline void onLog(const std::function<void()>& func) { fOnLog = func; }
+	// Setting behavior on after an output.
+	static inline void onLog(const std::function<void()>& func) noexcept { fOnLog = func; }
 };
 
-int KlyLogger::iStartWorkerThread = startWorkerThread(); // 启动 logger 专用线程
+bool KlyLogger::iStartWorkerThread = startWorkerThread();
+#endif
