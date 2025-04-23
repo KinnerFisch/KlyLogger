@@ -8,6 +8,7 @@
 #include <format>
 #include <thread>
 #include <queue>
+using namespace std::chrono_literals;
 
 #ifdef _WIN32
 #include <io.h>
@@ -19,15 +20,13 @@
 extern "C" int RtlGetVersion(PRTL_OSVERSIONINFOEXW) noexcept;
 #endif
 #else
-#include <memory>
-#include <unistd.h>
 #include <sys/stat.h>
-#define FOREGROUND_BLUE          0x0001
-#define FOREGROUND_GREEN         0x0002
-#define FOREGROUND_RED           0x0004
-#define FOREGROUND_INTENSITY     0x0008
-#define COMMON_LVB_REVERSE_VIDEO 0x4000
-#define COMMON_LVB_UNDERSCORE    0x8000
+#define FOREGROUND_RED 0
+#define FOREGROUND_BLUE 0
+#define FOREGROUND_GREEN 0
+#define FOREGROUND_INTENSITY 0
+#define COMMON_LVB_UNDERSCORE 0
+#define COMMON_LVB_REVERSE_VIDEO 0
 #endif
 
 template <typename T, typename = void>
@@ -49,11 +48,10 @@ private:
 	};
 
 	static inline std::queue<LogTask> logQueue;
-	static inline std::function<void()> fOnLog = nullptr;
 	static inline bool isAtty = isatty(fileno(stderr));
+	static inline std::function<void()> fOnLog = nullptr;
 	static inline std::queue<std::wstring> convertArgsStorage;
 	static inline std::wstring_convert<std::codecvt_utf8<wchar_t>> converter;
-	static inline std::chrono::milliseconds _1ms = std::chrono::milliseconds(1);
 
 #ifdef _WIN32
 	static inline HANDLE hStderr = GetStdHandle(STD_ERROR_HANDLE);
@@ -112,7 +110,7 @@ private:
 		try {
 			return converter.from_bytes(str);
 		} catch (...) {
-			return { str.begin(), str.end() };
+			return std::wstring(str.begin(), str.end()) + L"\2478\247o (decoder error)";
 		}
 	}
 
@@ -130,32 +128,33 @@ private:
 	static inline std::ofstream getLogFileHandle() noexcept {
 		try {
 #ifdef _WIN32
-			char path[5120];
-			GetModuleFileNameA(nullptr, path, 5120);
+			wchar_t path[5120];
+			GetModuleFileNameW(nullptr, path, 5120);
 #else
 			char path[5120];
 			ssize_t len = readlink("/proc/self/exe", path, sizeof(path) - 1);
-			if (len == -1) return std::ofstream();
-			path[len] = '\0';
+			if (len == -1) return {};
+			path[len] = 0;
 #endif
 			if (logsDirectory.empty() || latestLog.empty()) {
-				logsDirectory = std::filesystem::path(path).parent_path().string() + "/logs/";
-				latestLog = logsDirectory + "latest.log";
+				logsDirectory = std::filesystem::path(path).parent_path() / "logs";
+				latestLog = logsDirectory / "latest.log";
 			}
 			std::filesystem::create_directories(logsDirectory);
 			tm time = getLocalTime();
 			if (std::filesystem::exists(latestLog)) {
 				tm fileTime {};
 				struct stat fileStat {};
-				if (stat(latestLog.c_str(), &fileStat)) fileTime = time;
 #ifdef _WIN32
+				if (_wstat(latestLog.c_str(), (struct _stat64i32*)&fileStat)) fileTime = time;
 				else localtime_s(&fileTime, &fileStat.st_mtime);
 #else
+				if (stat(latestLog.string().c_str(), &fileStat)) fileTime = time;
 				else localtime_r(&fileStat.st_mtime, &fileTime);
 #endif
 				unsigned i = 0;
-				while (std::filesystem::exists(std::format("{}{:04}-{:02}-{:02}-{}.log", logsDirectory, fileTime.tm_year + 1900, fileTime.tm_mon + 1, fileTime.tm_mday, ++i)));
-				std::filesystem::rename(latestLog, std::format("{}{:04}-{:02}-{:02}-{}.log", logsDirectory, fileTime.tm_year + 1900, fileTime.tm_mon + 1, fileTime.tm_mday, i));
+				while (std::filesystem::exists(std::format(L"{}/{:04}-{:02}-{:02}-{}.log", logsDirectory.wstring(), fileTime.tm_year + 1900, fileTime.tm_mon + 1, fileTime.tm_mday, ++i)));
+				std::filesystem::rename(latestLog, std::format(L"{}/{:04}-{:02}-{:02}-{}.log", logsDirectory.wstring(), fileTime.tm_year + 1900, fileTime.tm_mon + 1, fileTime.tm_mday, i));
 			}
 			logFileCreateDate = (time.tm_year << 16) + (time.tm_mon << 8) + time.tm_mday;
 			return std::ofstream(latestLog, std::ios::out | std::ios::trunc | std::ios::binary);
@@ -166,7 +165,7 @@ private:
 
 	static inline unsigned logFileCreateDate = 0;
 	static inline std::ofstream logFile = getLogFileHandle();
-	static inline std::string logsDirectory, latestLog;
+	static inline std::filesystem::path logsDirectory, latestLog;
 
 	static inline void updateLogFileHandle() noexcept {
 		tm time = getLocalTime();
@@ -193,6 +192,9 @@ private:
 			while (true) {
 				if (finishedTasks()) continue;
 				LogTask task = logQueue.front();
+#ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
+				updateLogFileHandle();
+#endif
 				logMessage(task.name, task.message, task.level, task.levelColor, task.levelAnsiColor, task.textColor, task.textAnsiColor);
 				try {
 					if (fOnLog) fOnLog();
@@ -286,16 +288,23 @@ private:
 			}
 			msg = msg.substr(pos + 2);
 		}
+		std::string converted;
 		if (isAtty) {
 #ifdef _WIN32
 			std::cerr << std::flush;
 			WriteConsoleW(hStderr, msg.c_str(), (unsigned)msg.length(), nullptr, nullptr);
 #else
-			std::cerr << converter.to_bytes(msg);
+			try {
+				converted = converter.to_bytes(msg);
+			} catch (...) {
+				converted = { msg.begin(), msg.end() };
+			}
+			std::cerr << converted;
 #endif
 		}
 #ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
-		if (logFile.is_open()) logFile << converter.to_bytes(msg);
+		if (converted.empty()) converted = converter.to_bytes(msg);
+		if (logFile.is_open()) logFile << converted;
 #endif
 	}
 
@@ -369,9 +378,6 @@ private:
 
 	template<typename... Args>
 	inline void pushTask(const std::wstring& message, const std::string& level, unsigned short levelColor, const std::string& levelAnsiColor, unsigned short textColor, const std::string& textAnsiColor, const Args&... args) const noexcept {
-#ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
-		updateLogFileHandle();
-#endif
 		std::wstring formatted;
 		try {
 			formatted = std::vformat(message, std::make_wformat_args(convertFormatting(args)...));
@@ -434,7 +440,7 @@ public:
 	static inline bool finishedTasks() noexcept { return logQueue.empty(); }
 
 	// Wait for log output to finish.
-	static inline void wait() noexcept { while (!finishedTasks()) std::this_thread::sleep_for(_1ms); }
+	static inline void wait() noexcept { while (!finishedTasks()) std::this_thread::sleep_for(1ms); }
 
 	// Setting behavior on after an output.
 	static inline void onLog(const std::function<void()>& func) noexcept { fOnLog = func; }
