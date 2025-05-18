@@ -9,7 +9,6 @@
 #include <thread>
 #include <queue>
 using namespace std::chrono_literals;
-
 #ifdef _WIN32
 #include <io.h>
 #include <Windows.h>
@@ -54,7 +53,11 @@ private:
 	static inline std::wstring_convert<std::codecvt_utf8<wchar_t>> converter;
 
 #ifdef _WIN32
+#ifdef KLY_LOGGER_OPTION_NO_CACHE_FOR_OUTPUT_HANDLE
+#define hStderr GetStdHandle(STD_ERROR_HANDLE)
+#else
 	static inline HANDLE hStderr = GetStdHandle(STD_ERROR_HANDLE);
+#endif
 
 	static inline bool isAnsiSupported() noexcept {
 		if (!isAtty) return false;
@@ -82,10 +85,18 @@ private:
 #endif
 	}
 
+	static inline void writeToStderr(const std::string& text) {
+#ifdef _WIN32
+		WriteConsoleA(hStderr, text.c_str(), (unsigned)text.length(), nullptr, nullptr);
+#else
+		std::cerr << text;
+#endif
+	}
+
 	static bool iStartWorkerThread;
 
-	std::wstring name, as_wstring;
-	std::string as_string;
+	std::wstring name{}, as_wstring{};
+	std::string as_string{};
 
 	static inline tm getLocalTime() noexcept {
 		time_t now = time(nullptr);
@@ -117,7 +128,7 @@ private:
 	static inline void setConsoleColor(unsigned color, const std::string& ansi) {
 		if (!isAtty) return;
 #ifdef _WIN32
-		if (ansiSupported) std::cerr << ansi;
+		if (ansiSupported) writeToStderr(ansi);
 		else SetConsoleTextAttribute(hStderr, color);
 #else
 		std::cerr << ansi;
@@ -183,7 +194,7 @@ private:
 #else
 		intptr_t lastPos = std::max((intptr_t)name.find_last_of(L'\r'), (intptr_t)name.find_last_of(L'\n'));
 #endif
-		return lastPos != std::wstring::npos ? name.substr(lastPos + 1) : name;
+		return name.substr(lastPos + 1);
 	}
 
 	static inline bool startWorkerThread() noexcept {
@@ -206,7 +217,7 @@ private:
 	}
 
 	static inline void write(const std::string& msg) noexcept {
-		if (isAtty) std::cerr << msg;
+		if (isAtty) writeToStderr(msg);
 #ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
 		if (logFile.is_open()) logFile << msg;
 #endif
@@ -215,7 +226,7 @@ private:
 	static inline void write(std::wstring msg, unsigned short initialColor, const std::string& ansiColor) noexcept {
 		while (msg.back() == L'\247') msg.pop_back();
 		size_t pos;
-		while ((pos = msg.find(L'\247')) != std::wstring::npos) {
+		while ((pos = msg.find(L'\247')) != std::string::npos) {
 			write(msg.substr(0, pos), initialColor, ansiColor);
 			if (isAtty) {
 				switch (msg[pos + 1]) {
@@ -274,16 +285,16 @@ private:
 						setConsoleColor(getTextAttribute() | COMMON_LVB_REVERSE_VIDEO, "\33[5m");
 						break;
 					case L'l':
-						if (ansiSupported) std::cerr << "\33[21m";
+						if (ansiSupported) writeToStderr("\33[21m");
 						break;
 					case L'm':
-						if (ansiSupported) std::cerr << "\33[9m";
+						if (ansiSupported) writeToStderr("\33[9m");
 						break;
 					case L'n':
 						setConsoleColor(getTextAttribute() | COMMON_LVB_UNDERSCORE, "\33[4m");
 						break;
 					case L'o':
-						if (ansiSupported) std::cerr << "\33[3m";
+						if (ansiSupported) writeToStderr("\33[3m");
 				}
 			}
 			msg = msg.substr(pos + 2);
@@ -311,7 +322,7 @@ private:
 	static inline void printTime(const std::wstring& name, const std::string& level, unsigned short levelColor, const std::string& levelAnsiColor, unsigned short textColor, const std::string& textAnsiColor) noexcept {
 		tm localTime = getLocalTime();
 		if (isAtty) {
-			std::cerr << '\r';
+			writeToStderr("\r");
 			setConsoleColor(FOREGROUND_BLUE | FOREGROUND_GREEN, "\33[0;36m");
 		}
 		write("[");
@@ -333,9 +344,9 @@ private:
 	static inline void logMessage(const std::wstring& name, std::wstring message, const std::string& level, unsigned short levelColor, const std::string& levelAnsiColor, unsigned short textColor, const std::string& textAnsiColor) noexcept {
 		size_t newlinePos;
 #ifdef min
-		while ((newlinePos = min(message.find(L'\r'), message.find(L'\n'))) != std::wstring::npos) {
+		while ((newlinePos = min(message.find(L'\r'), message.find(L'\n'))) != std::string::npos) {
 #else
-		while ((newlinePos = std::min(message.find(L'\r'), message.find(L'\n'))) != std::wstring::npos) {
+		while ((newlinePos = std::min(message.find(L'\r'), message.find(L'\n'))) != std::string::npos) {
 #endif
 			logMessage(name, message.substr(0, newlinePos), level, levelColor, levelAnsiColor, textColor, textAnsiColor);
 			message = message.substr(newlinePos + 1);
@@ -344,7 +355,7 @@ private:
 			printTime(name, level, levelColor, levelAnsiColor, textColor, textAnsiColor);
 			write(message.substr(message.find_last_of(L'\r') + 1), textColor, textAnsiColor);
 			if (isAtty) {
-				if (ansiSupported) std::cerr << "\33[m\33[K";
+				if (ansiSupported) writeToStderr("\33[m\33[K");
 #ifdef _WIN32
 				else {
 					SetConsoleTextAttribute(hStderr, FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_RED);
@@ -390,7 +401,7 @@ private:
 
 public:
 	// Create a nameless logger.
-	KlyLogger() noexcept : as_string("KlyLogger{name=<empty>}"), as_wstring(L"KlyLogger{name=<empty>}") {};
+	KlyLogger() noexcept : as_wstring(L"KlyLogger{name=<empty>}"), as_string("KlyLogger{name=<empty>}") {};
 
 	// Get as std::string
 	[[nodiscard]] inline std::string string() const noexcept { return as_string; }
@@ -447,4 +458,8 @@ public:
 };
 
 bool KlyLogger::iStartWorkerThread = startWorkerThread();
+
+#ifdef KLY_LOGGER_OPTION_NO_CACHE_FOR_OUTPUT_HANDLE
+#undef hStderr
+#endif
 #endif
