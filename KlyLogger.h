@@ -6,7 +6,7 @@
 #include <codecvt>
 #include <fstream>
 #include <format>
-#include <thread>
+#include <mutex>
 #include <queue>
 using namespace std::chrono_literals;
 #ifdef _WIN32
@@ -46,6 +46,7 @@ private:
 		unsigned short levelColor, textColor;
 	};
 
+	static inline std::mutex mutex;
 	static inline std::queue<LogTask> logQueue;
 	static inline bool isAtty = isatty(fileno(stderr));
 	static inline std::function<void()> fOnLog = nullptr;
@@ -201,6 +202,7 @@ private:
 		static std::shared_ptr<void> ptr(nullptr, [](void*) { wait(); });
 		std::thread([]() {
 			while (true) {
+				std::unique_lock<std::mutex> lock(mutex);
 				if (finishedTasks()) continue;
 				LogTask task = logQueue.front();
 #ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
@@ -226,7 +228,7 @@ private:
 	static inline void write(std::wstring msg, unsigned short initialColor, const std::string& ansiColor) noexcept {
 		while (msg.back() == L'\247') msg.pop_back();
 		size_t pos;
-		while ((pos = msg.find(L'\247')) != std::string::npos) {
+		while ((pos = msg.find(L'\247')) != std::wstring::npos) {
 			write(msg.substr(0, pos), initialColor, ansiColor);
 			if (isAtty) {
 				switch (msg[pos + 1]) {
@@ -344,9 +346,9 @@ private:
 	static inline void logMessage(const std::wstring& name, std::wstring message, const std::string& level, unsigned short levelColor, const std::string& levelAnsiColor, unsigned short textColor, const std::string& textAnsiColor) noexcept {
 		size_t newlinePos;
 #ifdef min
-		while ((newlinePos = min(message.find(L'\r'), message.find(L'\n'))) != std::string::npos) {
+		while ((newlinePos = min(message.find(L'\r'), message.find(L'\n'))) != std::wstring::npos) {
 #else
-		while ((newlinePos = std::min(message.find(L'\r'), message.find(L'\n'))) != std::string::npos) {
+		while ((newlinePos = std::min(message.find(L'\r'), message.find(L'\n'))) != std::wstring::npos) {
 #endif
 			logMessage(name, message.substr(0, newlinePos), level, levelColor, levelAnsiColor, textColor, textAnsiColor);
 			message = message.substr(newlinePos + 1);
@@ -396,6 +398,7 @@ private:
 		} catch (const std::exception& e) {
 			formatted = message + L"\2478\247o (" + convertToWString(e.what()) + L')';
 		} catch (...) {}
+		std::unique_lock<std::mutex> lock(mutex);
 		logQueue.push({ name, formatted, level, levelAnsiColor, textAnsiColor, levelColor, textColor });
 	}
 
