@@ -9,6 +9,7 @@
 #include <mutex>
 #include <queue>
 using namespace std::chrono_literals;
+
 #ifdef _WIN32
 #include <io.h>
 #include <Windows.h>
@@ -19,6 +20,7 @@ using namespace std::chrono_literals;
 extern "C" int RtlGetVersion(PRTL_OSVERSIONINFOEXW) noexcept;
 #endif
 #else
+#include <thread>
 #include <sys/stat.h>
 #define FOREGROUND_RED 0
 #define FOREGROUND_BLUE 0
@@ -65,7 +67,7 @@ private:
 		RTL_OSVERSIONINFOEXW osInfo = {};
 		osInfo.dwOSVersionInfoSize = sizeof(osInfo);
 		if (RtlGetVersion(&osInfo) || osInfo.dwMajorVersion < 10) return false;
-		unsigned long mode = 0;
+		unsigned long mode;
 		if (GetConsoleMode(hStderr, &mode)) {
 			SetConsoleMode(hStderr, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
 			return true;
