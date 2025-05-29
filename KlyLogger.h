@@ -6,7 +6,7 @@
 #include <codecvt>
 #include <fstream>
 #include <format>
-#include <mutex>
+#include <thread>
 #include <queue>
 using namespace std::chrono_literals;
 
@@ -19,8 +19,8 @@ using namespace std::chrono_literals;
 #pragma comment(lib, "ntdll.lib")
 extern "C" int RtlGetVersion(PRTL_OSVERSIONINFOEXW) noexcept;
 #endif
+
 #else
-#include <thread>
 #include <sys/stat.h>
 #define FOREGROUND_RED 0
 #define FOREGROUND_BLUE 0
@@ -48,10 +48,11 @@ private:
 		unsigned short levelColor, textColor;
 	};
 
-	static inline std::mutex mutex;
+	static inline std::wstring lineBuffer;
+	static inline std::atomic<bool> lockFlag;
 	static inline std::queue<LogTask> logQueue;
+	static inline std::function<void()> fOnLog;
 	static inline bool isAtty = isatty(fileno(stderr));
-	static inline std::function<void()> fOnLog = nullptr;
 	static inline std::queue<std::wstring> convertArgsStorage;
 	static inline std::wstring_convert<std::codecvt_utf8<wchar_t>> converter;
 
@@ -88,16 +89,6 @@ private:
 #endif
 	}
 
-	static inline void writeToStderr(const std::string& text) {
-#ifdef _WIN32
-		WriteConsoleA(hStderr, text.c_str(), (unsigned)text.length(), nullptr, nullptr);
-#else
-		std::cerr << text;
-#endif
-	}
-
-	static bool iStartWorkerThread;
-
 	std::wstring name{}, as_wstring{};
 	std::string as_string{};
 
@@ -114,10 +105,10 @@ private:
 
 	static inline std::wstring convertToWString(const std::string& str) noexcept {
 #ifdef _WIN32
-		int len = MultiByteToWideChar(CP_ACP, MB_ERR_INVALID_CHARS, str.c_str(), -1, nullptr, 0);
+		int len = MultiByteToWideChar(CP_ACP, MB_ERR_INVALID_CHARS, str.c_str(), EOF, nullptr, 0);
 		if (len--) {
 			std::wstring result(len, 0);
-			MultiByteToWideChar(CP_ACP, MB_ERR_INVALID_CHARS, str.c_str(), -1, result.data(), len);
+			MultiByteToWideChar(CP_ACP, MB_ERR_INVALID_CHARS, str.c_str(), EOF, result.data(), len);
 			return result;
 		}
 #endif
@@ -128,13 +119,11 @@ private:
 		}
 	}
 
-	static inline void setConsoleColor(unsigned color, const std::string& ansi) {
+	static inline void setConsoleColor(unsigned color, const std::string& ansi) noexcept {
 		if (!isAtty) return;
+		if (ansiSupported) lineBuffer += std::wstring(ansi.begin(), ansi.end());
 #ifdef _WIN32
-		if (ansiSupported) writeToStderr(ansi);
 		else SetConsoleTextAttribute(hStderr, color);
-#else
-		std::cerr << ansi;
 #endif
 	}
 
@@ -147,7 +136,7 @@ private:
 #else
 			char path[5120];
 			ssize_t len = readlink("/proc/self/exe", path, sizeof(path) - 1);
-			if (len == -1) return {};
+			if (len == EOF) return {};
 			path[len] = 0;
 #endif
 			if (logsDirectory.empty() || latestLog.empty()) {
@@ -166,8 +155,8 @@ private:
 				if (stat(latestLog.string().c_str(), &fileStat)) fileTime = time;
 				else localtime_r(&fileStat.st_mtime, &fileTime);
 #endif
-				unsigned i = 0;
-				while (std::filesystem::exists(std::format(L"{}/{:04}-{:02}-{:02}-{}.log", logsDirectory.wstring(), fileTime.tm_year + 1900, fileTime.tm_mon + 1, fileTime.tm_mday, ++i)));
+				unsigned i = 1;
+				while (std::filesystem::exists(std::format(L"{}/{:04}-{:02}-{:02}-{}.log", logsDirectory.wstring(), fileTime.tm_year + 1900, fileTime.tm_mon + 1, fileTime.tm_mday, i))) ++i;
 				std::filesystem::rename(latestLog, std::format(L"{}/{:04}-{:02}-{:02}-{}.log", logsDirectory.wstring(), fileTime.tm_year + 1900, fileTime.tm_mon + 1, fileTime.tm_mday, i));
 			}
 			logFileCreateDate = (time.tm_year << 16) + (time.tm_mon << 8) + time.tm_mday;
@@ -177,7 +166,7 @@ private:
 		}
 	}
 
-	static inline unsigned logFileCreateDate = 0;
+	static inline unsigned logFileCreateDate;
 	static inline std::ofstream logFile = getLogFileHandle();
 	static inline std::filesystem::path logsDirectory, latestLog;
 
@@ -193,35 +182,20 @@ private:
 
 	static inline std::wstring legalizeLoggerName(const std::wstring& name) noexcept {
 #ifdef max
-		intptr_t lastPos = max((intptr_t)name.find_last_of(L'\r'), (intptr_t)name.find_last_of(L'\n'));
+		intptr_t lastPos = max(static_cast<intptr_t>(name.find_last_of(L'\r')), static_cast<intptr_t>(name.find_last_of(L'\n')));
 #else
-		intptr_t lastPos = std::max((intptr_t)name.find_last_of(L'\r'), (intptr_t)name.find_last_of(L'\n'));
+		intptr_t lastPos = std::max(static_cast<intptr_t>(name.find_last_of(L'\r')), static_cast<intptr_t>(name.find_last_of(L'\n')));
 #endif
 		return name.substr(lastPos + 1);
 	}
 
-	static inline bool startWorkerThread() noexcept {
-		static std::shared_ptr<void> ptr(nullptr, [](void*) { wait(); });
-		std::thread([]() {
-			while (true) {
-				std::unique_lock<std::mutex> lock(mutex);
-				if (finishedTasks()) continue;
-				LogTask task = logQueue.front();
-#ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
-				updateLogFileHandle();
-#endif
-				logMessage(task.name, task.message, task.level, task.levelColor, task.levelAnsiColor, task.textColor, task.textAnsiColor);
-				try {
-					if (fOnLog) fOnLog();
-				} catch (...) {}
-				logQueue.pop();
-			}
-		}).detach();
-		return true;
-	}
-
 	static inline void write(const std::string& msg) noexcept {
-		if (isAtty) writeToStderr(msg);
+		if (isAtty) {
+			lineBuffer += std::wstring(msg.begin(), msg.end());
+#ifdef _WIN32
+			if (!ansiSupported) WriteConsoleA(hStderr, msg.c_str(), static_cast<unsigned>(msg.length()), nullptr, nullptr);
+#endif
+		}
 #ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
 		if (logFile.is_open()) logFile << msg;
 #endif
@@ -289,44 +263,41 @@ private:
 						setConsoleColor(getTextAttribute() | COMMON_LVB_REVERSE_VIDEO, "\33[5m");
 						break;
 					case L'l':
-						if (ansiSupported) writeToStderr("\33[21m");
+						if (ansiSupported) lineBuffer += L"\33[21m";
 						break;
 					case L'm':
-						if (ansiSupported) writeToStderr("\33[9m");
+						if (ansiSupported) lineBuffer += L"\33[9m";
 						break;
 					case L'n':
 						setConsoleColor(getTextAttribute() | COMMON_LVB_UNDERSCORE, "\33[4m");
 						break;
 					case L'o':
-						if (ansiSupported) writeToStderr("\33[3m");
+						if (ansiSupported) lineBuffer += L"\33[3m";
+						break;
+					default:
+						break;
 				}
 			}
 			msg = msg.substr(pos + 2);
 		}
-		std::string converted;
 		if (isAtty) {
+			if (ansiSupported) lineBuffer += msg;
 #ifdef _WIN32
-			std::cerr << std::flush;
-			WriteConsoleW(hStderr, msg.c_str(), (unsigned)msg.length(), nullptr, nullptr);
-#else
-			try {
-				converted = converter.to_bytes(msg);
-			} catch (...) {
-				converted = { msg.begin(), msg.end() };
-			}
-			std::cerr << converted;
+			else WriteConsoleW(hStderr, msg.c_str(), static_cast<unsigned>(msg.length()), nullptr, nullptr);
 #endif
 		}
 #ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
-		if (converted.empty()) converted = converter.to_bytes(msg);
-		if (logFile.is_open()) logFile << converted;
+		if (logFile.is_open()) logFile << converter.to_bytes(msg);
 #endif
 	}
 
 	static inline void printTime(const std::wstring& name, const std::string& level, unsigned short levelColor, const std::string& levelAnsiColor, unsigned short textColor, const std::string& textAnsiColor) noexcept {
 		tm localTime = getLocalTime();
 		if (isAtty) {
-			writeToStderr("\r");
+			if (ansiSupported) lineBuffer += L'\r';
+#ifdef _WIN32
+			else WriteConsoleA(hStderr, L"\r", 1, nullptr, nullptr);
+#endif
 			setConsoleColor(FOREGROUND_BLUE | FOREGROUND_GREEN, "\33[0;36m");
 		}
 		write("[");
@@ -359,7 +330,7 @@ private:
 			printTime(name, level, levelColor, levelAnsiColor, textColor, textAnsiColor);
 			write(message.substr(message.find_last_of(L'\r') + 1), textColor, textAnsiColor);
 			if (isAtty) {
-				if (ansiSupported) writeToStderr("\33[m\33[K");
+				if (ansiSupported) lineBuffer += L"\33[m\33[K";
 #ifdef _WIN32
 				else {
 					SetConsoleTextAttribute(hStderr, FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_RED);
@@ -370,9 +341,18 @@ private:
 				}
 #endif
 			}
-			write("\n");
+#ifdef _WIN32
+			if (ansiSupported) {
+				lineBuffer += L'\n';
+				WriteConsoleW(hStderr, lineBuffer.c_str(), static_cast<unsigned>(lineBuffer.length()), nullptr, nullptr);
+				lineBuffer.clear();
+			} else WriteConsoleA(hStderr, "\n", 1, nullptr, nullptr);
+#else
+			std::cerr << converter.to_bytes(lineBuffer) << std::endl;
+			lineBuffer.clear();
+#endif
 #ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
-			if (logFile.is_open()) logFile << std::flush;
+			if (logFile.is_open()) logFile << std::endl;
 #endif
 		}
 	}
@@ -400,8 +380,9 @@ private:
 		} catch (const std::exception& e) {
 			formatted = message + L"\2478\247o (" + convertToWString(e.what()) + L')';
 		} catch (...) {}
-		std::unique_lock<std::mutex> lock(mutex);
+		for (bool expected = false; !lockFlag.compare_exchange_weak(expected, true, std::memory_order_acquire); expected = false) std::this_thread::sleep_for(1ms);
 		logQueue.push({ name, formatted, level, levelAnsiColor, textAnsiColor, levelColor, textColor });
+		lockFlag.store(false, std::memory_order_release);
 	}
 
 public:
@@ -460,9 +441,28 @@ public:
 
 	// Setting behavior on after an output.
 	static inline void onLog(const std::function<void()>& func) noexcept { fOnLog = func; }
-};
 
-bool KlyLogger::iStartWorkerThread = startWorkerThread();
+private:
+	static inline std::shared_ptr<void> waiter = [] {
+		std::thread([] {
+			while (true) {
+				if (finishedTasks()) continue;
+				for (bool expected = false; !lockFlag.compare_exchange_weak(expected, true, std::memory_order_acquire); expected = false) std::this_thread::sleep_for(1ms);
+				LogTask task = logQueue.front();
+#ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
+				updateLogFileHandle();
+#endif
+				logMessage(task.name, task.message, task.level, task.levelColor, task.levelAnsiColor, task.textColor, task.textAnsiColor);
+				try {
+					if (fOnLog) fOnLog();
+				} catch (...) {}
+				logQueue.pop();
+				lockFlag.store(false, std::memory_order_release);
+			}
+		}).detach();
+		return std::shared_ptr<void>(nullptr, [](void*) { wait(); });
+	}();
+};
 
 #ifdef KLY_LOGGER_OPTION_NO_CACHE_FOR_OUTPUT_HANDLE
 #undef hStderr
