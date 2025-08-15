@@ -1,5 +1,6 @@
 #ifndef KLY_LOGGER_INCLUDED
 #define KLY_LOGGER_INCLUDED
+
 #include <filesystem>
 #include <functional>
 #include <iostream>
@@ -8,6 +9,7 @@
 #include <format>
 #include <thread>
 #include <queue>
+
 using namespace std::chrono_literals;
 
 #ifdef _WIN32
@@ -43,16 +45,16 @@ struct has_wstring<T, std::void_t<decltype(std::declval<T>().wstring())>> : std:
 class KlyLogger {
 private:
 	struct LogTask {
-		std::wstring name, message;
-		std::string level, levelAnsiColor, textAnsiColor;
-		unsigned short levelColor, textColor;
+		const std::wstring name, message;
+		const std::string level, levelAnsiColor, textAnsiColor;
+		const unsigned short levelColor, textColor;
 	};
 
 	static inline std::wstring lineBuffer;
 	static inline std::atomic<bool> lockFlag;
 	static inline std::queue<LogTask> logQueue;
 	static inline std::function<void()> fOnLog;
-	static inline bool isAtty = isatty(fileno(stderr));
+	static inline const bool isAtty = isatty(fileno(stderr));
 	static inline std::queue<std::wstring> convertArgsStorage;
 	static inline std::wstring_convert<std::codecvt_utf8<wchar_t>> converter;
 
@@ -60,7 +62,7 @@ private:
 #ifdef KLY_LOGGER_OPTION_NO_CACHE_FOR_OUTPUT_HANDLE
 #define hStderr GetStdHandle(STD_ERROR_HANDLE)
 #else
-	static inline HANDLE hStderr = GetStdHandle(STD_ERROR_HANDLE);
+	static inline const HANDLE hStderr = GetStdHandle(STD_ERROR_HANDLE);
 #endif
 
 	static inline bool isAnsiSupported() noexcept {
@@ -75,10 +77,10 @@ private:
 		} else return false;
 	}
 
-	static inline bool ansiSupported = isAnsiSupported();
+	static inline const bool ansiSupported = isAnsiSupported();
 	static inline CONSOLE_SCREEN_BUFFER_INFO csbi;
 #else
-	static inline bool ansiSupported = true;
+	static inline constexpr bool ansiSupported = true;
 #endif
 
 	static inline unsigned short getTextAttribute() noexcept {
@@ -89,11 +91,11 @@ private:
 #endif
 	}
 
-	std::wstring name{}, as_wstring{};
-	std::string as_string{};
+	const std::wstring name{}, as_wstring{};
+	const std::string as_string{};
 
 	static inline tm getLocalTime() noexcept {
-		time_t now = time(nullptr);
+		const time_t now = time(nullptr);
 		tm result {};
 #ifdef _WIN32
 		localtime_s(&result, &now);
@@ -135,7 +137,7 @@ private:
 			GetModuleFileNameW(nullptr, path, 5120);
 #else
 			char path[5120];
-			ssize_t len = readlink("/proc/self/exe", path, sizeof(path) - 1);
+			const ssize_t len = readlink("/proc/self/exe", path, sizeof(path) - 1);
 			if (len == EOF) return {};
 			path[len] = 0;
 #endif
@@ -144,7 +146,7 @@ private:
 				latestLog = logsDirectory / "latest.log";
 			}
 			std::filesystem::create_directories(logsDirectory);
-			tm time = getLocalTime();
+			const tm time = getLocalTime();
 			if (std::filesystem::exists(latestLog)) {
 				tm fileTime {};
 				struct stat fileStat {};
@@ -171,8 +173,8 @@ private:
 	static inline std::filesystem::path logsDirectory, latestLog;
 
 	static inline void updateLogFileHandle() noexcept {
-		tm time = getLocalTime();
-		unsigned date = (time.tm_year << 16) + (time.tm_mon << 8) + time.tm_mday;
+		const tm time = getLocalTime();
+		const unsigned date = (time.tm_year << 16) + (time.tm_mon << 8) + time.tm_mday;
 		if (date != logFileCreateDate) {
 			if (logFile.is_open()) logFile.close();
 			logFile = getLogFileHandle();
@@ -182,9 +184,9 @@ private:
 
 	static inline std::wstring legalizeLoggerName(const std::wstring& name) noexcept {
 #ifdef max
-		intptr_t lastPos = max(static_cast<intptr_t>(name.find_last_of(L'\r')), static_cast<intptr_t>(name.find_last_of(L'\n')));
+		const intptr_t lastPos = max(static_cast<intptr_t>(name.find_last_of(L'\r')), static_cast<intptr_t>(name.find_last_of(L'\n')));
 #else
-		intptr_t lastPos = std::max(static_cast<intptr_t>(name.find_last_of(L'\r')), static_cast<intptr_t>(name.find_last_of(L'\n')));
+		const intptr_t lastPos = std::max(static_cast<intptr_t>(name.find_last_of(L'\r')), static_cast<intptr_t>(name.find_last_of(L'\n')));
 #endif
 		return name.substr(lastPos + 1);
 	}
@@ -204,7 +206,7 @@ private:
 	static inline void write(std::wstring msg, unsigned short initialColor, const std::string& ansiColor) noexcept {
 		while (msg.back() == L'\247') msg.pop_back();
 		size_t pos;
-		while ((pos = msg.find(L'\247')) != std::wstring::npos) {
+		while ((pos = msg.find(L'\247')) != std::string::npos) {
 			write(msg.substr(0, pos), initialColor, ansiColor);
 			if (isAtty) {
 				switch (msg[pos + 1]) {
@@ -292,7 +294,7 @@ private:
 	}
 
 	static inline void printTime(const std::wstring& name, const std::string& level, unsigned short levelColor, const std::string& levelAnsiColor, unsigned short textColor, const std::string& textAnsiColor) noexcept {
-		tm localTime = getLocalTime();
+		const tm localTime = getLocalTime();
 		if (isAtty) {
 			if (ansiSupported) lineBuffer += L'\r';
 #ifdef _WIN32
@@ -319,9 +321,9 @@ private:
 	static inline void logMessage(const std::wstring& name, std::wstring message, const std::string& level, unsigned short levelColor, const std::string& levelAnsiColor, unsigned short textColor, const std::string& textAnsiColor) noexcept {
 		size_t newlinePos;
 #ifdef min
-		while ((newlinePos = min(message.find(L'\r'), message.find(L'\n'))) != std::wstring::npos) {
+		while ((newlinePos = min(message.find(L'\r'), message.find(L'\n'))) != std::string::npos) {
 #else
-		while ((newlinePos = std::min(message.find(L'\r'), message.find(L'\n'))) != std::wstring::npos) {
+		while ((newlinePos = std::min(message.find(L'\r'), message.find(L'\n'))) != std::string::npos) {
 #endif
 			logMessage(name, message.substr(0, newlinePos), level, levelColor, levelAnsiColor, textColor, textAnsiColor);
 			message = message.substr(newlinePos + 1);
@@ -374,13 +376,21 @@ private:
 	template<typename... Args>
 	inline void pushTask(const std::wstring& message, const std::string& level, unsigned short levelColor, const std::string& levelAnsiColor, unsigned short textColor, const std::string& textAnsiColor, const Args&... args) const noexcept {
 		std::wstring formatted;
-		try {
-			formatted = std::vformat(message, std::make_wformat_args(convertFormatting(args)...));
-			convertArgsStorage = std::queue<std::wstring>();
-		} catch (const std::exception& e) {
-			formatted = message + L"\2478\247o (" + convertToWString(e.what()) + L')';
-		} catch (...) {}
-		for (bool expected = false; !lockFlag.compare_exchange_weak(expected, true, std::memory_order_acquire); expected = false) std::this_thread::sleep_for(1ms);
+		if constexpr (sizeof...(args) == 0) formatted = message;
+		else {
+			try {
+				formatted = std::vformat(message, std::make_wformat_args(convertFormatting(args)...));
+				convertArgsStorage = std::queue<std::wstring>();
+			}
+			catch (const std::exception& e) {
+				formatted = message + L"\2478\247o (" + convertToWString(e.what()) + L')';
+			}
+			catch (...) {}
+		}
+		for (bool expected = false; !lockFlag.compare_exchange_weak(expected, true, std::memory_order_acquire); expected = false) {
+			std::this_thread::yield();
+			std::this_thread::sleep_for(1ms);
+		}
 		logQueue.push({ name, formatted, level, levelAnsiColor, textAnsiColor, levelColor, textColor });
 		lockFlag.store(false, std::memory_order_release);
 	}
@@ -437,7 +447,12 @@ public:
 	static inline bool finishedTasks() noexcept { return logQueue.empty(); }
 
 	// Wait for log output to finish.
-	static inline void wait() noexcept { while (!finishedTasks()) std::this_thread::sleep_for(1ms); }
+	static inline void wait() noexcept {
+		while (!finishedTasks()) {
+			std::this_thread::yield();
+			std::this_thread::sleep_for(1ms);
+		}
+	}
 
 	// Setting behavior on after an output.
 	static inline void onLog(const std::function<void()>& func) noexcept { fOnLog = func; }
@@ -445,14 +460,28 @@ public:
 private:
 	static inline std::shared_ptr<void> waiter = [] {
 		std::thread([] {
+#ifdef _WIN32
+			SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);
+#else
+			sched_param sch;
+			sch.sched_priority = sched_get_priority_min(SCHED_OTHER);
+			pthread_setschedparam(pthread_self(), SCHED_OTHER, &sch);
+#endif
 			while (true) {
-				if (finishedTasks()) continue;
-				for (bool expected = false; !lockFlag.compare_exchange_weak(expected, true, std::memory_order_acquire); expected = false) std::this_thread::sleep_for(1ms);
-				LogTask task = logQueue.front();
+				if (finishedTasks()) {
+					std::this_thread::yield();
+					std::this_thread::sleep_for(1ms);
+					continue;
+				}
+				for (bool expected = false; !lockFlag.compare_exchange_weak(expected, true, std::memory_order_acquire); expected = false) {
+					std::this_thread::yield();
+					std::this_thread::sleep_for(1ms);
+				}
+				auto& [name, message, level, levelAnsiColor, textAnsiColor, levelColor, textColor] = logQueue.front();
 #ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
 				updateLogFileHandle();
 #endif
-				logMessage(task.name, task.message, task.level, task.levelColor, task.levelAnsiColor, task.textColor, task.textAnsiColor);
+				logMessage(name, message, level, levelColor, levelAnsiColor, textColor, textAnsiColor);
 				try {
 					if (fOnLog) fOnLog();
 				} catch (...) {}
@@ -467,4 +496,5 @@ private:
 #ifdef KLY_LOGGER_OPTION_NO_CACHE_FOR_OUTPUT_HANDLE
 #undef hStderr
 #endif
+
 #endif
