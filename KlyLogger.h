@@ -1,500 +1,712 @@
+#pragma once
+#define _SILENCE_CXX17_CODECVT_HEADER_DEPRECATION_WARNING
+
 #ifndef KLY_LOGGER_INCLUDED
 #define KLY_LOGGER_INCLUDED
 
+#include <codecvt>
+#include <cstring>
 #include <filesystem>
+#include <format>
+#include <fstream>
 #include <functional>
 #include <iostream>
-#include <codecvt>
-#include <fstream>
-#include <format>
-#include <thread>
 #include <queue>
+#include <sys/stat.h>
+#include <thread>
 
 using namespace std::chrono_literals;
 
 #ifdef _WIN32
-#include <io.h>
 #include <Windows.h>
+#include <io.h>
 #define isatty _isatty
 #define fileno _fileno
+
+// If RtlGetVersion is already defined elsewhere in the codebase,
+// this macro can be enabled to avoid symbol conflicts.
 #ifndef KLY_LOGGER_DISABLE_EXTERN_RTL_GET_VERSION
 #pragma comment(lib, "ntdll.lib")
 extern "C" int RtlGetVersion(PRTL_OSVERSIONINFOEXW) noexcept;
 #endif
 
 #else
-#include <sys/stat.h>
-#define FOREGROUND_RED 0
-#define FOREGROUND_BLUE 0
-#define FOREGROUND_GREEN 0
-#define FOREGROUND_INTENSITY 0
-#define COMMON_LVB_UNDERSCORE 0
-#define COMMON_LVB_REVERSE_VIDEO 0
+#include <unistd.h>
+#include <sys/resource.h>
 #endif
 
-template <typename T, typename = void>
-struct has_string : std::false_type {};
-template <typename T>
-struct has_string<T, std::void_t<decltype(std::declval<T>().string())>> : std::true_type {};
-template <typename T, typename = void>
+// Type traits for string conversion.
+template<typename T, typename = void>
+struct has_string : std::false_type {
+};
+template<typename T>
+struct has_string<T, std::void_t<decltype(std::declval<T>().string())>> : std::true_type {
+};
+template<typename T, typename = void>
 struct has_wstring : std::false_type {};
-template <typename T>
-struct has_wstring<T, std::void_t<decltype(std::declval<T>().wstring())>> : std::true_type {};
+template<typename T>
+struct has_wstring<T, std::void_t<decltype(std::declval<T>().wstring())>> : std::true_type {
+};
+
+#if defined(min) || defined(max)
+#undef min
+#undef max
+#endif
 
 // KlyLogger: lightweight, visually and easy-to-use logger.
 class KlyLogger {
 private:
-	struct LogTask {
-		const std::wstring name, message;
+	// LogStyle encapsulates all visual and textual attributes for a log level,
+	// including level name, Windows console colors, and ANSI escape sequences.
+	static constexpr struct LogStyle {
 		const std::string level, levelAnsiColor, textAnsiColor;
 		const unsigned short levelColor, textColor;
+	} INFO_STYLE{"INFO", "\33[0;92m", "\33[0;37m", 10, 7}, WARN_STYLE{"WARN", "\33[0;33m", "\33[0;93m", 6, 14},
+	ERROR_STYLE{"ERROR", "\33[0;31m", "\33[0;91m", 4, 12},
+	FATAL_STYLE{"FATAL", "\33[2;31m", "\33[0;31m", 32772, 4};
+
+	// Lookup tables: convert Minecraft color codes to ANSI sequences.
+	static constexpr const char *mcToAnsiEscape[]{"\33[30m", "\33[0;34m", "\33[0;32m", "\33[0;36m", "\33[0;31m", "\33[0;35m", "\33[0;33m", "\33[0;37m", "\33[0;90m", "\33[0;94m", "\33[0;92m", "\33[0;96m", "\33[0;91m", "\33[0;95m", "\33[0;93m", "\33[0;97m"};
+
+	// Log task containing logger name, log message and log style.
+	struct LogTask {
+		const LogStyle style;
+		const std::wstring name, message;
 	};
 
-	static inline std::wstring lineBuffer;
-	static inline std::atomic<bool> lockFlag;
-	static inline std::queue<LogTask> logQueue;
-	static inline std::function<void()> fOnLog;
-	static inline const bool isAtty = isatty(fileno(stderr));
-	static inline std::queue<std::wstring> convertArgsStorage;
-	static inline std::wstring_convert<std::codecvt_utf8<wchar_t>> converter;
+	// Platform-specific console handling.
+	class ConsoleHelper {
+	public:
+		static inline std::unordered_map<wchar_t, std::pair<unsigned short, std::string>> mappings = {{L'k', {7, "\33[5m"}}, {L'l', {7, "\33[21m"}}, {L'm', {7, "\33[9m"}}, {L'n', {7, "\33[4m"}}, {L'o', {7, "\33[3m"}}, {L'r', {7, "\33[m"}}};
 
+		// Initialize console and check if console supports ANSI escape sequences.
+		static bool initialize() {
 #ifdef _WIN32
-#ifdef KLY_LOGGER_OPTION_NO_CACHE_FOR_OUTPUT_HANDLE
-#define hStderr GetStdHandle(STD_ERROR_HANDLE)
-#else
-	static inline const HANDLE hStderr = GetStdHandle(STD_ERROR_HANDLE);
-#endif
+			// If the output is not a terminal, then ANSI sequences are not supported.
+			if (!isAtty) return false;
 
-	static inline bool isAnsiSupported() noexcept {
-		if (!isAtty) return false;
-		RTL_OSVERSIONINFOEXW osInfo = {};
-		osInfo.dwOSVersionInfoSize = sizeof(osInfo);
-		if (RtlGetVersion(&osInfo) || osInfo.dwMajorVersion < 10) return false;
-		unsigned long mode;
-		if (GetConsoleMode(hStderr, &mode)) {
-			SetConsoleMode(hStderr, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
-			return true;
-		} else return false;
-	}
+			RTL_OSVERSIONINFOEXW osInfo{};
+			osInfo.dwOSVersionInfoSize = sizeof(osInfo);
 
-	static inline const bool ansiSupported = isAnsiSupported();
-	static inline CONSOLE_SCREEN_BUFFER_INFO csbi;
-#else
-	static inline constexpr bool ansiSupported = true;
-#endif
+			// Get OS version using RtlGetVersion.
+			// If the call fails or the system is older than Windows 10,
+			// then ANSI sequences are not supported.
+			if (RtlGetVersion(&osInfo) || osInfo.dwMajorVersion < 10) return false;
 
-	static inline unsigned short getTextAttribute() noexcept {
-#ifdef _WIN32
-		return GetConsoleScreenBufferInfo(hStderr, &csbi) ? csbi.wAttributes : FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_RED;
-#else
-		return 0;
-#endif
-	}
-
-	const std::wstring name{}, as_wstring{};
-	const std::string as_string{};
-
-	static inline tm getLocalTime() noexcept {
-		const time_t now = time(nullptr);
-		tm result {};
-#ifdef _WIN32
-		localtime_s(&result, &now);
-#else
-		localtime_r(&now, &result);
-#endif
-		return result;
-	}
-
-	static inline std::wstring convertToWString(const std::string& str) noexcept {
-#ifdef _WIN32
-		int len = MultiByteToWideChar(CP_ACP, MB_ERR_INVALID_CHARS, str.c_str(), EOF, nullptr, 0);
-		if (len--) {
-			std::wstring result(len, 0);
-			MultiByteToWideChar(CP_ACP, MB_ERR_INVALID_CHARS, str.c_str(), EOF, result.data(), len);
-			return result;
-		}
-#endif
-		try {
-			return converter.from_bytes(str);
-		} catch (...) {
-			return std::wstring(str.begin(), str.end()) + L"\2478\247o (decoder error)";
-		}
-	}
-
-	static inline void setConsoleColor(unsigned color, const std::string& ansi) noexcept {
-		if (!isAtty) return;
-		if (ansiSupported) lineBuffer += std::wstring(ansi.begin(), ansi.end());
-#ifdef _WIN32
-		else SetConsoleTextAttribute(hStderr, color);
-#endif
-	}
-
-#ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
-	static inline std::ofstream getLogFileHandle() noexcept {
-		try {
-#ifdef _WIN32
-			wchar_t path[5120];
-			GetModuleFileNameW(nullptr, path, 5120);
-#else
-			char path[5120];
-			const ssize_t len = readlink("/proc/self/exe", path, sizeof(path) - 1);
-			if (len == EOF) return {};
-			path[len] = 0;
-#endif
-			if (logsDirectory.empty() || latestLog.empty()) {
-				logsDirectory = std::filesystem::path(path).parent_path() / "logs";
-				latestLog = logsDirectory / "latest.log";
+			unsigned long mode;
+			if (GetConsoleMode(getHandle(), &mode)) {
+				// Enable "virtual terminal processing" in the console mode.
+				// This makes the console recognize ANSI escape sequences.
+				return SetConsoleMode(getHandle(), mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
 			}
-			std::filesystem::create_directories(logsDirectory);
-			const tm time = getLocalTime();
-			if (std::filesystem::exists(latestLog)) {
-				tm fileTime {};
-				struct stat fileStat {};
-#ifdef _WIN32
-				if (_wstat(latestLog.c_str(), (struct _stat64i32*)&fileStat)) fileTime = time;
-				else localtime_s(&fileTime, &fileStat.st_mtime);
+
+			// If we cannot get the console mode, assume ANSI is unsupported.
+			return false;
 #else
-				if (stat(latestLog.string().c_str(), &fileStat)) fileTime = time;
-				else localtime_r(&fileStat.st_mtime, &fileTime);
+			return isAtty;
 #endif
-				unsigned i = 1;
-				while (std::filesystem::exists(std::format(L"{}/{:04}-{:02}-{:02}-{}.log", logsDirectory.wstring(), fileTime.tm_year + 1900, fileTime.tm_mon + 1, fileTime.tm_mday, i))) ++i;
-				std::filesystem::rename(latestLog, std::format(L"{}/{:04}-{:02}-{:02}-{}.log", logsDirectory.wstring(), fileTime.tm_year + 1900, fileTime.tm_mon + 1, fileTime.tm_mday, i));
-			}
-			logFileCreateDate = (time.tm_year << 16) + (time.tm_mon << 8) + time.tm_mday;
-			return std::ofstream(latestLog, std::ios::out | std::ios::trunc | std::ios::binary);
-		} catch (...) {
-			return {};
 		}
-	}
 
-	static inline unsigned logFileCreateDate;
-	static inline std::ofstream logFile = getLogFileHandle();
-	static inline std::filesystem::path logsDirectory, latestLog;
+		// Set the text color for current console output.
+		static void setColor(unsigned short color, const std::string& ansi) {
+			if (!isAtty) return;
 
-	static inline void updateLogFileHandle() noexcept {
-		const tm time = getLocalTime();
-		const unsigned date = (time.tm_year << 16) + (time.tm_mon << 8) + time.tm_mday;
-		if (date != logFileCreateDate) {
-			if (logFile.is_open()) logFile.close();
-			logFile = getLogFileHandle();
-		}
-	}
-#endif
-
-	static inline std::wstring legalizeLoggerName(const std::wstring& name) noexcept {
-#ifdef max
-		const intptr_t lastPos = max(static_cast<intptr_t>(name.find_last_of(L'\r')), static_cast<intptr_t>(name.find_last_of(L'\n')));
-#else
-		const intptr_t lastPos = std::max(static_cast<intptr_t>(name.find_last_of(L'\r')), static_cast<intptr_t>(name.find_last_of(L'\n')));
-#endif
-		return name.substr(lastPos + 1);
-	}
-
-	static inline void write(const std::string& msg) noexcept {
-		if (isAtty) {
-			lineBuffer += std::wstring(msg.begin(), msg.end());
+			if (ansiSupported) lineBuffer += StringConverter::toWString(ansi.begin(), ansi.end());
 #ifdef _WIN32
-			if (!ansiSupported) WriteConsoleA(hStderr, msg.c_str(), static_cast<unsigned>(msg.length()), nullptr, nullptr);
+			else SetConsoleTextAttribute(getHandle(), color);
 #endif
 		}
-#ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
-		if (logFile.is_open()) logFile << msg;
-#endif
-	}
 
-	static inline void write(std::wstring msg, unsigned short initialColor, const std::string& ansiColor) noexcept {
-		while (msg.back() == L'\247') msg.pop_back();
-		size_t pos;
-		while ((pos = msg.find(L'\247')) != std::string::npos) {
-			write(msg.substr(0, pos), initialColor, ansiColor);
+		// Get the text attributes of the current console text.
+		static unsigned short getTextAttribute() {
+#ifdef _WIN32
+			CONSOLE_SCREEN_BUFFER_INFO csbi;
+			return GetConsoleScreenBufferInfo(getHandle(), &csbi) ? csbi.wAttributes : 7;
+#else
+			return 0;
+#endif
+		}
+
+		// Output string to console.
+		static void write(const std::string& msg) {
 			if (isAtty) {
-				switch (msg[pos + 1]) {
-					case L'0':
-						setConsoleColor(0, "\33[30m");
-						break;
-					case L'1':
-						setConsoleColor(FOREGROUND_BLUE, "\33[0;34m");
-						break;
-					case L'2':
-						setConsoleColor(FOREGROUND_GREEN, "\33[0;32m");
-						break;
-					case L'3':
-						setConsoleColor(FOREGROUND_BLUE | FOREGROUND_GREEN, "\33[0;36m");
-						break;
-					case L'4':
-						setConsoleColor(FOREGROUND_RED, "\33[0;31m");
-						break;
-					case L'5':
-						setConsoleColor(FOREGROUND_BLUE | FOREGROUND_RED, "\33[0;35m");
-						break;
-					case L'6':
-						setConsoleColor(FOREGROUND_GREEN | FOREGROUND_RED, "\33[0;33m");
-						break;
-					case L'7':
-						setConsoleColor(FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_RED, "\33[0;37m");
-						break;
-					case L'8':
-						setConsoleColor(FOREGROUND_INTENSITY, "\33[0;90m");
-						break;
-					case L'9':
-						setConsoleColor(FOREGROUND_BLUE | FOREGROUND_INTENSITY, "\33[0;94m");
-						break;
-					case L'a':
-						setConsoleColor(FOREGROUND_GREEN | FOREGROUND_INTENSITY, "\33[0;92m");
-						break;
-					case L'b':
-						setConsoleColor(FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_INTENSITY, "\33[0;96m");
-						break;
-					case L'c':
-						setConsoleColor(FOREGROUND_RED | FOREGROUND_INTENSITY, "\33[0;91m");
-						break;
-					case L'd':
-						setConsoleColor(FOREGROUND_BLUE | FOREGROUND_RED | FOREGROUND_INTENSITY, "\33[0;95m");
-						break;
-					case L'e':
-						setConsoleColor(FOREGROUND_GREEN | FOREGROUND_RED | FOREGROUND_INTENSITY, "\33[0;93m");
-						break;
-					case L'f':
-						setConsoleColor(FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_RED | FOREGROUND_INTENSITY, "\33[0;97m");
-						break;
-					case L'r':
-						setConsoleColor(initialColor, ansiColor);
-						break;
-					case L'k':
-						setConsoleColor(getTextAttribute() | COMMON_LVB_REVERSE_VIDEO, "\33[5m");
-						break;
-					case L'l':
-						if (ansiSupported) lineBuffer += L"\33[21m";
-						break;
-					case L'm':
-						if (ansiSupported) lineBuffer += L"\33[9m";
-						break;
-					case L'n':
-						setConsoleColor(getTextAttribute() | COMMON_LVB_UNDERSCORE, "\33[4m");
-						break;
-					case L'o':
-						if (ansiSupported) lineBuffer += L"\33[3m";
-						break;
-					default:
-						break;
-				}
-			}
-			msg = msg.substr(pos + 2);
-		}
-		if (isAtty) {
-			if (ansiSupported) lineBuffer += msg;
+				lineBuffer += StringConverter::toWString(msg.begin(), msg.end());
 #ifdef _WIN32
-			else WriteConsoleW(hStderr, msg.c_str(), static_cast<unsigned>(msg.length()), nullptr, nullptr);
+				if (!ansiSupported) WriteConsoleA(getHandle(), msg.c_str(), static_cast<unsigned>(msg.length()), nullptr, nullptr);
 #endif
-		}
+			}
 #ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
-		if (logFile.is_open()) logFile << converter.to_bytes(msg);
+			if (logFile.is_open()) logFile << msg;
 #endif
-	}
+		}
 
-	static inline void printTime(const std::wstring& name, const std::string& level, unsigned short levelColor, const std::string& levelAnsiColor, unsigned short textColor, const std::string& textAnsiColor) noexcept {
-		const tm localTime = getLocalTime();
-		if (isAtty) {
-			if (ansiSupported) lineBuffer += L'\r';
-#ifdef _WIN32
-			else WriteConsoleA(hStderr, L"\r", 1, nullptr, nullptr);
-#endif
-			setConsoleColor(FOREGROUND_BLUE | FOREGROUND_GREEN, "\33[0;36m");
-		}
-		write("[");
-		setConsoleColor(FOREGROUND_BLUE | FOREGROUND_GREEN, "\33[0;36m");
-		write(std::format("{:02}:{:02}:{:02} ", localTime.tm_hour, localTime.tm_min, localTime.tm_sec));
-		setConsoleColor(levelColor , levelAnsiColor);
-		write(level);
-		setConsoleColor(FOREGROUND_BLUE | FOREGROUND_GREEN, "\33[0;36m");
-		write("] ");
-		if (!name.empty()) {
-			write("[");
-			write(name, FOREGROUND_BLUE | FOREGROUND_GREEN, "\33[0;36m");
-			setConsoleColor(FOREGROUND_BLUE | FOREGROUND_GREEN, "\33[0;36m");
-			write("] ");
-		}
-		setConsoleColor(textColor, textAnsiColor);
-	}
-
-	static inline void logMessage(const std::wstring& name, std::wstring message, const std::string& level, unsigned short levelColor, const std::string& levelAnsiColor, unsigned short textColor, const std::string& textAnsiColor) noexcept {
-		size_t newlinePos;
-#ifdef min
-		while ((newlinePos = min(message.find(L'\r'), message.find(L'\n'))) != std::string::npos) {
-#else
-		while ((newlinePos = std::min(message.find(L'\r'), message.find(L'\n'))) != std::string::npos) {
-#endif
-			logMessage(name, message.substr(0, newlinePos), level, levelColor, levelAnsiColor, textColor, textAnsiColor);
-			message = message.substr(newlinePos + 1);
-		}
-		if (message[0]) {
-			printTime(name, level, levelColor, levelAnsiColor, textColor, textAnsiColor);
-			write(message.substr(message.find_last_of(L'\r') + 1), textColor, textAnsiColor);
+		// Output wide string to console.
+		static void write(const std::wstring& msg) {
 			if (isAtty) {
-				if (ansiSupported) lineBuffer += L"\33[m\33[K";
+				if (ansiSupported) lineBuffer += msg;
 #ifdef _WIN32
-				else {
-					SetConsoleTextAttribute(hStderr, FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_RED);
-					GetConsoleScreenBufferInfo(hStderr, &csbi);
-					unsigned long length = csbi.dwSize.X - csbi.dwCursorPosition.X;
-					FillConsoleOutputCharacterA(hStderr, ' ', length, csbi.dwCursorPosition, &length);
-					FillConsoleOutputAttribute(hStderr, csbi.wAttributes, length, csbi.dwCursorPosition, &length);
-				}
+				else WriteConsoleW(getHandle(), msg.c_str(), static_cast<unsigned>(msg.length()), nullptr, nullptr);
 #endif
 			}
+#ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
+			if (logFile.is_open()) logFile << StringConverter::toString(msg);
+#endif
+		}
+
+		// Flush buffered line content to console.
+		static void flushLine() {
+			if (lineBuffer.empty()) return;
+
 #ifdef _WIN32
 			if (ansiSupported) {
-				lineBuffer += L'\n';
-				WriteConsoleW(hStderr, lineBuffer.c_str(), static_cast<unsigned>(lineBuffer.length()), nullptr, nullptr);
-				lineBuffer.clear();
-			} else WriteConsoleA(hStderr, "\n", 1, nullptr, nullptr);
+				lineBuffer.push_back(L'\n');
+				WriteConsoleW(getHandle(), lineBuffer.c_str(), static_cast<unsigned>(lineBuffer.length()), nullptr, nullptr);
+			}
+			else WriteConsoleA(getHandle(), "\n", 1, nullptr, nullptr);
 #else
-			std::cerr << converter.to_bytes(lineBuffer) << std::endl;
-			lineBuffer.clear();
+			std::cerr << StringConverter::toString(lineBuffer) << std::endl;
 #endif
 #ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
 			if (logFile.is_open()) logFile << std::endl;
 #endif
+			lineBuffer.clear();
 		}
-	}
 
-	template<typename T>
-	static inline auto& convertFormatting(const T& arg) {
-		if constexpr (std::is_same_v<T, std::string> || std::is_convertible_v<T, const char*>) {
-			convertArgsStorage.push(convertToWString(arg));
-			return convertArgsStorage.back();
-		} else if constexpr (has_wstring<T>::value) {
-			convertArgsStorage.push(arg.wstring());
-			return convertArgsStorage.back();
-		} else if constexpr (has_string<T>::value) {
-			convertArgsStorage.push(convertToWString(arg.string()));
-			return convertArgsStorage.back();
-		} else return arg;
-	}
+		// Clear remaining content in current line.
+		static void clearLine() {
+			if (!isAtty) return;
 
-	template<typename... Args>
-	inline void pushTask(const std::wstring& message, const std::string& level, unsigned short levelColor, const std::string& levelAnsiColor, unsigned short textColor, const std::string& textAnsiColor, const Args&... args) const noexcept {
-		std::wstring formatted;
-		if constexpr (sizeof...(args) == 0) formatted = message;
-		else {
+			// Clear any remaining text to the right of the cursor.
+			if (ansiSupported) lineBuffer += L"\33[m\33[K";
+#ifdef _WIN32
+			else {
+				// On Windows without ANSI, fill the rest of the line with spaces and reset attributes.
+				SetConsoleTextAttribute(getHandle(), 7);
+				CONSOLE_SCREEN_BUFFER_INFO csbi;
+				if (GetConsoleScreenBufferInfo(getHandle(), &csbi)) {
+					unsigned long length = csbi.dwSize.X - csbi.dwCursorPosition.X;
+					FillConsoleOutputCharacterA(getHandle(), ' ', length, csbi.dwCursorPosition, &length);
+					FillConsoleOutputAttribute(getHandle(), csbi.wAttributes, length, csbi.dwCursorPosition, &length);
+				}
+			}
+#endif
+		}
+		
+		// Update dynamic color mappings and find the specified color code.
+		static auto updateMappingsAndFind(const wchar_t code, unsigned short initialColor, const std::string& ansiColor) {
+			const unsigned short attribute = getTextAttribute();
+			mappings.at(L'l').first = mappings.at(L'm').first = mappings.at(L'o').first = attribute;
+			mappings.at(L'k').first = attribute | 0x4000;
+			mappings.at(L'n').first = attribute | 0x8000;
+			mappings.at(L'r') = {initialColor, ansiColor};
+			return mappings.find(code);
+		}
+
+		// Process Minecraft color codes in message text.
+		static void processColorCodes(std::wstring msg, unsigned short initialColor, const std::string& ansiColor) {
+			while (!msg.empty() && msg.back() == L'\247') msg.pop_back();
+
+			size_t pos;
+			while ((pos = msg.find(L'\247')) != std::wstring::npos) {
+				write(msg.substr(0, pos));
+				if (isAtty && pos + 1 < msg.length()) applyMinecraftColorCode(msg[pos + 1], initialColor, ansiColor);
+				msg = msg.substr(pos + 2);
+			}
+
+			if (!msg.empty()) write(msg);
+		}
+
+		// Set console text color and style based on a Minecraft-style color code.
+		static void applyMinecraftColorCode(wchar_t code, unsigned short initialColor, const std::string& ansiColor) {
+			// For color codes that only change the text color, use the special mapping.
+			if (L'0' <= code && code <= L'9') setColor(code - L'0', mcToAnsiEscape[code - L'0']);
+			else if (L'a' <= code && code <= L'f') setColor(code - L'W', mcToAnsiEscape[code - L'W']);
+			// For formatting codes, use a temporary specific mapping.
+			else {
+				auto it = updateMappingsAndFind(code, initialColor, ansiColor);
+				if (it != mappings.end()) setColor(it->second.first, it->second.second);
+			}
+		}
+
+#ifdef _WIN32
+		// Get Windows stderr handle with optional caching.
+		static HANDLE getHandle() {
+#ifndef KLY_LOGGER_OPTION_NO_CACHE_FOR_OUTPUT_HANDLE
+			// In cache mode, no need to retrieve stderr handle each time.
+			static
+#endif
+			// In no-cache mode, retrieve the stderr handle on each output.
+			const HANDLE handle = GetStdHandle(STD_ERROR_HANDLE);
+			return handle;
+		}
+#endif
+	};
+
+	// File logging helper.
+	class FileLogger {
+	public:
+		// Initialize file logging system if enabled.
+		static void initialize() {
+#ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
+			logFile = getLogFileHandle();
+#endif
+		}
+
+		// Pack date components into a compact unsigned integer representation.
+		static unsigned packDate(const tm& time) {
+			return (time.tm_year << 16) + (time.tm_mon << 8) + time.tm_mday;
+		}
+
+		// Update the log file handle for log rotation.
+		static void updateIfNeeded() {
+#ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
+			if (packDate(TimeUtils::getLocalTime()) != logFileCreateDate) {
+				if (logFile.is_open()) logFile.close();
+				initialize();
+			}
+#endif
+		}
+
+		// Get the absolute path of the current executable.
+		static std::filesystem::path getExecutablePath() {
+#ifdef _WIN32
+			// Get executable path on Windows.
+			wchar_t path[5120];
+			GetModuleFileNameW(nullptr, path, 5120);
+#else
+			// Get executable path on Linux.
+			char path[5120];
+			const ssize_t len = readlink("/proc/self/exe", path, sizeof(path) - 1);
+			if (len == -1) return {};
+			path[len] = 0;
+#endif
+			return path;
+		}
+
+		// Retrieve the current log file handle, creating directories and rotating logs if needed.
+		static std::ofstream getLogFileHandle() {
+#ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
 			try {
-				formatted = std::vformat(message, std::make_wformat_args(convertFormatting(args)...));
-				convertArgsStorage = std::queue<std::wstring>();
+				// Initialize logs directory and latest log file path if empty.
+				if (logsDirectory.empty() || latestLog.empty()) {
+					logsDirectory = getExecutablePath().parent_path() / "logs";
+					latestLog = logsDirectory / "latest.log";
+				}
+
+				// Ensure log directory exists.
+				std::filesystem::create_directories(logsDirectory);
+				const tm time = TimeUtils::getLocalTime();
+				// Rename existing log file if present.
+				rotateLogFiles(time);
+				logFileCreateDate = packDate(time);
+				return std::ofstream(latestLog, std::ios::out | std::ios::trunc | std::ios::binary);
+			} catch (...) {
+				// Disable log file if any exception occurs.
+				return {};
 			}
-			catch (const std::exception& e) {
-				formatted = message + L"\2478\247o (" + convertToWString(e.what()) + L')';
+#else
+			return {};
+#endif
+		}
+
+		// Rename the existing latest.log to a dated backup file with the format YYYY-MM-DD-N.log.
+		static void rotateLogFiles(const tm& time) {
+#ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
+			if (!std::filesystem::exists(latestLog)) return;
+
+			tm fileTime{};
+			struct stat fileStat;
+			if (stat(latestLog.string().c_str(), &fileStat)) fileTime = time;
+#ifdef _WIN32
+			else localtime_s(&fileTime, &fileStat.st_mtime);
+#else
+			else localtime_r(&fileStat.st_mtime, &fileTime);
+#endif
+			// Find the first available filename in the format YYYY-MM-DD-N.log
+			// Increment 'i' until a non-existing filename is found.
+			unsigned i = 1;
+			std::wstring newFilename;
+			do {
+				newFilename = std::format(L"{}/{:04}-{:02}-{:02}-{}.log", logsDirectory.wstring(), fileTime.tm_year + 1900, fileTime.tm_mon + 1, fileTime.tm_mday, i++);
+			} while (std::filesystem::exists(newFilename));
+
+			std::filesystem::rename(latestLog, newFilename);
+#endif
+		}
+	};
+
+	// String conversion utilities.
+	class StringConverter {
+	public:
+		// Cross-platform string encoding converter.
+		static inline std::wstring_convert<std::codecvt_utf8<wchar_t>> converter;
+
+		// Cache used when converting arguments for log tasks (prevents loss of converted data or incorrect log output).
+		static inline std::queue<std::wstring> converted;
+
+		// Convert wide string to narrow string.
+		static std::string toString(const std::wstring& str) {
+			return converter.to_bytes(str);
+		}
+
+		// Convert narrow string to wide string safely.
+		static std::wstring toWString(const std::string& str) {
+#ifdef _WIN32
+			// On Windows, try using the system code page (CP_ACP) first for conversion.
+			// MB_ERR_INVALID_CHARS ensures invalid characters cause an error.
+			int len = MultiByteToWideChar(CP_ACP, MB_ERR_INVALID_CHARS, str.c_str(), -1, nullptr, 0);
+			// If a valid length is returned, perform the conversion.
+			if (len > 0) {
+				// Create a wide string with the required length.
+				std::wstring result(len - 1, 0);
+				// Convert the narrow string to wide string using MultiByteToWideChar.
+				MultiByteToWideChar(CP_ACP, MB_ERR_INVALID_CHARS, str.c_str(), -1, result.data(), len);
+				// Return the successfully converted wide string.
+				return result;
 			}
-			catch (...) {}
+#endif
+			try {
+				// Fallback: use std::wstring_convert to convert UTF-8 to wstring.
+				return converter.from_bytes(str);
+			} catch (const std::exception& e) {
+				// If conversion fails, handle exception:
+				// Return a fallback wide string: original characters plus an error message.
+				const auto& what = e.what();
+				return toWString(str.begin(), str.end()) + L"\2478\247o (decoder error: " + toWString(what, what + strlen(what)) + L')';
+			}
 		}
-		for (bool expected = false; !lockFlag.compare_exchange_weak(expected, true, std::memory_order_acquire); expected = false) {
-			std::this_thread::yield();
-			std::this_thread::sleep_for(1ms);
+
+		// Convert narrow string to wide string directly.
+		static std::wstring toWString(const auto& from, const auto& to) {
+			return std::wstring(from, to);
 		}
-		logQueue.push({ name, formatted, level, levelAnsiColor, textAnsiColor, levelColor, textColor });
-		lockFlag.store(false, std::memory_order_release);
+		// Helper to normalize different argument types into wide strings.
+		// Handles std::string, const char*, and custom types with string()/wstring().
+		template<typename T>
+		static auto& convertFormatting(const T& arg) {
+			// If argument is a std::string or convertible to const char*, 
+			// convert it to std::wstring and store.
+			if constexpr (std::is_same_v<T, std::string> || std::is_convertible_v<T, const char *>) {
+				converted.push(toWString(arg));
+				return converted.back();
+			}
+			// If type provides a wstring() method, use it directly.
+			else if constexpr (has_wstring<T>::value) {
+				converted.push(arg.wstring());
+				return converted.back();
+			}
+			// If type provides a string() method, convert it to wstring.
+			else if constexpr (has_string<T>::value) {
+				converted.push(toWString(arg.string()));
+				return converted.back();
+			}
+			// Otherwise, return the argument itself.
+			else return arg;
+		}
+
+		// Convert any argument into std::wstring for formatting.
+		// Returns the original value if already wide string, otherwise uses std::format.
+		template<typename T>
+		static auto& convertArgumentToWString(const T& arg) {
+			// If already a std::wstring or convertible to const wchar_t*, return directly.
+			if constexpr (std::is_same_v<T, std::wstring> || std::is_convertible_v<T, const wchar_t*>) return arg;
+			// Otherwise, format the argument into a wide string using std::format.
+			else {
+				converted.push(std::format(L"{}", arg));
+				return converted.back();
+			}
+		}
+
+		// Clear temporary converted string cache.
+		static void clearConverted() {
+			converted = std::queue<std::wstring>();
+		}
+	};
+
+	// Time utilities.
+	class TimeUtils {
+	public:
+		// Retrieve the current local time.
+		static tm getLocalTime() {
+			const time_t now = time(nullptr);
+			tm result{};
+#ifdef _WIN32
+			localtime_s(&result, &now);
+#else
+			localtime_r(&now, &result);
+#endif
+			return result;
+		}
+
+		// Format time structure to %H:%M:%S string.
+		static std::wstring formatTime(const tm& time) {
+			return std::format(L"{:02}:{:02}:{:02} ", time.tm_hour, time.tm_min, time.tm_sec);
+		}
+	};
+
+	// Log message processing
+	class MessageProcessor {
+	public:
+		// Process complete log message including line splitting.
+		static void processMessage(const std::wstring& name, std::wstring message, const LogStyle& style) {
+			size_t newlinePos;
+			while ((newlinePos = findNextNewline(message)) != std::wstring::npos) {
+				processSingleLine(name, message.substr(0, newlinePos), style);
+				message = message.substr(newlinePos + 1);
+			}
+
+			if (!message.empty()) processSingleLine(name, message, style);
+		}
+
+		// Find position of next newline character (CR or LF).
+		static size_t findNextNewline(const std::wstring& str) {
+			const size_t crPos = str.find(L'\r'), lfPos = str.find(L'\n');
+
+			if (crPos == std::wstring::npos) return lfPos;
+			if (lfPos == std::wstring::npos) return crPos;
+
+			return std::min(crPos, lfPos);
+		}
+
+		// Process single line of log message with formatting.
+		static void processSingleLine(const std::wstring& name, const std::wstring& message, const LogStyle& style) {
+			if (message.empty()) return;
+
+			printTimeStamp(name, style);
+			ConsoleHelper::processColorCodes(message, style.textColor, style.textAnsiColor);
+			ConsoleHelper::clearLine();
+			ConsoleHelper::flushLine();
+		}
+
+		// Print current time and logger name (if provided).
+		static void printTimeStamp(const std::wstring& name, const LogStyle& style) {
+			// Get current local time for timestamp.
+			const tm localTime = TimeUtils::getLocalTime();
+
+			// Set cyan color for timestamp bracket if output is terminal.
+			if (isAtty) ConsoleHelper::setColor(3, "\33[0;36m");
+
+			ConsoleHelper::write("[");
+			ConsoleHelper::setColor(3, "\33[0;36m");
+			// Write formatted time (HH:MM:SS).
+			ConsoleHelper::write(TimeUtils::formatTime(localTime));
+			// Set level-specific color for level text.
+			ConsoleHelper::setColor(style.levelColor, style.levelAnsiColor);
+			ConsoleHelper::write(style.level);
+			// Reset to cyan for closing bracket.
+			ConsoleHelper::setColor(3, "\33[0;36m");
+			ConsoleHelper::write("] ");
+
+			// Add logger name section if name is not empty.
+			if (!name.empty()) {
+				ConsoleHelper::write("[");
+				// Process color codes in logger name.
+				ConsoleHelper::processColorCodes(name, 3, "\33[0;36m");
+				ConsoleHelper::setColor(3, "\33[0;36m");
+				ConsoleHelper::write("] ");
+			}
+
+			// Set final text color for the actual log message.
+			ConsoleHelper::setColor(style.textColor, style.textAnsiColor);
+		}
+	};
+
+	// Yield execution and sleep briefly to reduce busy-wait CPU usage.
+	static void pauseBriefly() {
+		std::this_thread::yield();
+		std::this_thread::sleep_for(1ms);
+	}
+
+	// Thread lock manager.
+	class LockManager {
+	public:
+		// Spin until the lock is acquired.
+		static void acquire() {
+			for (bool expected = false; !lockFlag.compare_exchange_weak(expected, true, std::memory_order_acquire); expected = false) pauseBriefly();
+		}
+
+		// Release the custom lock.
+		static void release() {
+			lockFlag.store(false, std::memory_order_release);
+		}
+
+		// Execute function with automatic lock acquisition and release.
+		template<typename Func>
+		static void execute(const Func&& operation) {
+			acquire();
+			operation();
+			release();
+		}
+	};
+
+	// Thread lock flag (mutex was avoided because on some devices it caused unexpected crashes).
+	static inline std::atomic_bool lockFlag;
+	// Log task queue, stores log tasks to be processed by the logging thread.
+	static inline std::queue<LogTask> logQueue;
+	// Code to execute after a log message has been output.
+	static inline std::function<void()> afterLog;
+	// Detect whether the process has a terminal.
+	// If not (e.g., output redirected to a file), console output will be disabled.
+	static inline const bool isAtty = isatty(fileno(stderr));
+	// Determines whether the console supports ANSI escape sequences.
+	static inline const bool ansiSupported = ConsoleHelper::initialize();
+
+#ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
+	// Record the date when the log file was created.
+	static inline unsigned logFileCreateDate;
+	// Log file handle.
+	static inline std::ofstream logFile;
+	// Directory and file path of log files.
+	static inline std::filesystem::path logsDirectory, latestLog;
+#endif
+
+	// Cache buffer when ANSI escape sequences are enabled.
+	// Output only complete lines to reduce output frequency.
+	static inline std::wstring lineBuffer;
+	// Logger name as wide string.
+	const std::wstring name{}, as_wstring{};
+	// Logger name as simple string.
+	const std::string as_string{};
+
+	// Normalize logger name to avoid unexpected illegal characters in output.
+	static std::wstring legalizeLoggerName(const std::wstring& name) {
+		const size_t lastPos = std::max(name.find_last_of(L'\r'), name.find_last_of(L'\n'));
+		return (lastPos == std::wstring::npos) ? name : name.substr(lastPos + 1);
+	}
+
+	// Submit a log output task to the logging thread.
+	template<typename MessageType, typename... Args>
+	void log(const MessageType& message, const LogStyle& style, const Args& ...args) const {
+		// Convert message to wide string format.
+		const auto convertedMessage = StringConverter::convertFormatting(message);
+		const std::wstring msg = StringConverter::convertArgumentToWString(convertedMessage);
+		std::wstring formatted = msg;
+
+		// Format message with arguments if provided.
+		if constexpr (sizeof...(args) > 0) {
+			try {
+				// Use std::vformat for argument substitution.
+				formatted = std::vformat(msg, std::make_wformat_args(StringConverter::convertFormatting(args)...));
+				// Clear conversion cache after successful formatting.
+				StringConverter::clearConverted();
+			} catch (const std::exception& e) {
+				// Append error message if formatting fails.
+				formatted = msg + L"\2478\247o (" + StringConverter::toWString(e.what()) + L')';
+			}
+		}
+
+		// Push formatted log task to queue.
+		LockManager::execute([&style, &formatted, this] {
+			logQueue.push({style, name, formatted});
+		});
 	}
 
 public:
-	// Create a nameless logger.
-	KlyLogger() noexcept : as_wstring(L"KlyLogger{name=<empty>}"), as_string("KlyLogger{name=<empty>}") {};
-
-	// Get as std::string
-	[[nodiscard]] inline std::string string() const noexcept { return as_string; }
-
-	// Get as std::wstring
-	[[nodiscard]] inline std::wstring wstring() const noexcept { return as_wstring; }
-
-	// Create a logger with std::wstring as its name.
-	explicit KlyLogger(const std::wstring& name) noexcept : name(legalizeLoggerName(name)), as_wstring(std::wstring(L"KlyLogger{name=") + (name.empty() ? L"<empty>" : name) + L'}'), as_string(converter.to_bytes(as_wstring)) {}
-
-	// Create a logger with std::string as its name.
-	explicit KlyLogger(const std::string& name) noexcept : name(legalizeLoggerName(convertToWString(name))), as_wstring(std::wstring(L"KlyLogger{name=") + (name.empty() ? L"<empty>" : this->name) + L'}'), as_string(converter.to_bytes(as_wstring)) {}
-
-	// Log INFO with std::wstring.
-	template<typename... Args>
-	inline void info(const std::wstring& message, const Args&... args) const noexcept { pushTask(message, "INFO", FOREGROUND_GREEN | FOREGROUND_INTENSITY, "\33[0;92m", FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_RED, "\33[0;37m", args...); }
-
-	// Log INFO with std::string.
-	template<typename... Args>
-	inline void info(const std::string& message, const Args&... args) const noexcept { info(convertToWString(message), args...); }
-
-	// Log WARN with std::wstring.
-	template<typename... Args>
-	inline void warn(const std::wstring& message, const Args&... args) const noexcept { pushTask(message, "WARN", FOREGROUND_GREEN | FOREGROUND_RED, "\33[0;33m", FOREGROUND_GREEN | FOREGROUND_RED | FOREGROUND_INTENSITY, "\33[0;93m", args...); }
-
-	// Log WARN with std::string.
-	template<typename... Args>
-	inline void warn(const std::string& message, const Args&... args) const noexcept { warn(convertToWString(message), args...); }
-
-	// Log ERROR with std::wstring.
-	template<typename... Args>
-	inline void error(const std::wstring& message, const Args&... args) const noexcept { pushTask(message, "ERROR", FOREGROUND_RED, "\33[0;31m", FOREGROUND_RED | FOREGROUND_INTENSITY, "\33[0;91m", args...); }
-
-	// Log ERROR with std::string.
-	template<typename... Args>
-	inline void error(const std::string& message, const Args&... args) const noexcept { error(convertToWString(message), args...); }
-
-	// Log FATAL with std::wstring.
-	template<typename... Args>
-	inline void fatal(const std::wstring& message, const Args&... args) const noexcept { pushTask(message, "FATAL", COMMON_LVB_UNDERSCORE | FOREGROUND_RED, "\33[2;31m", FOREGROUND_RED, "\33[0;31m", args...); }
-
-	// Log FATAL with std::string.
-	template<typename... Args>
-	inline void fatal(const std::string& message, const Args&... args) const noexcept { fatal(convertToWString(message), args...); }
-
-	// Determine whether all logging tasks have been completed.
-	static inline bool finishedTasks() noexcept { return logQueue.empty(); }
-
-	// Wait for log output to finish.
-	static inline void wait() noexcept {
-		while (!finishedTasks()) {
-			std::this_thread::yield();
-			std::this_thread::sleep_for(1ms);
-		}
+	// Construct a logger with no name.
+	KlyLogger() noexcept : as_wstring(L"KlyLogger{name=<empty>}"), as_string("KlyLogger{name=<empty>}") {
 	}
 
-	// Setting behavior on after an output.
-	static inline void onLog(const std::function<void()>& func) noexcept { fOnLog = func; }
+	// Construct a logger with a std::wstring name.
+	explicit KlyLogger(const std::wstring& name) noexcept :
+		name(legalizeLoggerName(name)), as_wstring(L"KlyLogger{name=" + (this->name.empty() ? L"<empty>" : this->name) + L'}'),
+		as_string(StringConverter::toString(as_wstring)) {
+	}
+
+	// Construct a logger with a std::string name.
+	explicit KlyLogger(const std::string& name) noexcept :
+		name(legalizeLoggerName(StringConverter::toWString(name))),
+		as_wstring(L"KlyLogger{name=" + (name.empty() ? L"<empty>" : this->name) + L'}'),
+		as_string(StringConverter::toString(as_wstring)) {
+	}
+
+	// Retrieve logger name as std::string.
+	[[nodiscard]] const std::string& string() const noexcept {
+		return as_string;
+	}
+
+	// Retrieve logger name as std::wstring.
+	[[nodiscard]] const std::wstring& wstring() const noexcept {
+		return as_wstring;
+	}
+
+	// Log an INFO-level message.
+	template<typename MessageType, typename... Args>
+	void info(const MessageType& message, const Args& ...args) const noexcept {
+		log(message, INFO_STYLE, args...);
+	}
+
+	// Log an WARN-level message.
+	template<typename MessageType, typename... Args>
+	void warn(const MessageType& message, const Args& ...args) const noexcept {
+		log(message, WARN_STYLE, args...);
+	}
+
+	// Log an ERROR-level message.
+	template<typename MessageType, typename... Args>
+	void error(const MessageType& message, const Args& ...args) const noexcept {
+		log(message, ERROR_STYLE, args...);
+	}
+
+	// Log an FATAL-level message.
+	template<typename MessageType, typename... Args>
+	void fatal(const MessageType& message, const Args& ...args) const noexcept {
+		log(message, FATAL_STYLE, args...);
+	}
+
+	// Check if all pending log tasks have been processed.
+	static bool finishedTasks() noexcept {
+		return logQueue.empty();
+	}
+
+	// Block the current thread until all log output is completed.
+	static void wait() noexcept {
+		while (!finishedTasks()) pauseBriefly();
+	}
+
+	// Register a callback function to execute after each log output.
+	static void onLog(const std::function<void()> &func) noexcept {
+		afterLog = func;
+	}
 
 private:
+	// Initialize a background thread to handle log queue processing and callbacks, ensuring it stays alive until program exit.
 	static inline std::shared_ptr<void> waiter = [] {
-		std::thread([] {
+		auto threadFunc = [] [[noreturn]] {
+			// Set the current thread to the lowest priority.
 #ifdef _WIN32
-			SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);
+			const HANDLE hThread = GetCurrentThread();
+			SetThreadPriority(hThread, THREAD_PRIORITY_IDLE);
 #else
-			sched_param sch;
-			sch.sched_priority = sched_get_priority_min(SCHED_OTHER);
-			pthread_setschedparam(pthread_self(), SCHED_OTHER, &sch);
+			std::cout << setpriority(PRIO_PROCESS, gettid(), 19) << std::endl;
 #endif
+
+			FileLogger::initialize();
 			while (true) {
-				if (finishedTasks()) {
-					std::this_thread::yield();
-					std::this_thread::sleep_for(1ms);
-					continue;
-				}
-				for (bool expected = false; !lockFlag.compare_exchange_weak(expected, true, std::memory_order_acquire); expected = false) {
-					std::this_thread::yield();
-					std::this_thread::sleep_for(1ms);
-				}
-				auto& [name, message, level, levelAnsiColor, textAnsiColor, levelColor, textColor] = logQueue.front();
+				while (logQueue.empty()) pauseBriefly();
+
+				LockManager::execute([] {
+					auto &[style, name, message] = logQueue.front();
 #ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
-				updateLogFileHandle();
+					FileLogger::updateIfNeeded();
 #endif
-				logMessage(name, message, level, levelColor, levelAnsiColor, textColor, textAnsiColor);
-				try {
-					if (fOnLog) fOnLog();
-				} catch (...) {}
-				logQueue.pop();
-				lockFlag.store(false, std::memory_order_release);
+					MessageProcessor::processMessage(name, message, style);
+
+					try {
+						if (afterLog) afterLog();
+					} catch (...) {
+					}
+
+					logQueue.pop();
+				});
 			}
-		}).detach();
-		return std::shared_ptr<void>(nullptr, [](void*) { wait(); });
+		};
+
+		std::thread(threadFunc).detach();
+
+		return std::shared_ptr<void>(nullptr, [](void *) {
+			wait();
+		});
 	}();
 };
-
-#ifdef KLY_LOGGER_OPTION_NO_CACHE_FOR_OUTPUT_HANDLE
-#undef hStderr
-#endif
 
 #endif
