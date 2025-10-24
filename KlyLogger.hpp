@@ -167,8 +167,7 @@ private:
 		const std::string level, levelAnsiColor, textAnsiColor;
 		const unsigned short levelColor, textColor;
 	} INFO_STYLE{"INFO", "\33[0;92m", "\33[0;37m", 10, 7}, WARN_STYLE{"WARN", "\33[0;33m", "\33[0;93m", 6, 14},
-	ERROR_STYLE{"ERROR", "\33[0;31m", "\33[0;91m", 4, 12},
-	FATAL_STYLE{"FATAL", "\33[2;31m", "\33[0;31m", 32772, 4};
+	ERROR_STYLE{"ERROR", "\33[0;31m", "\33[0;91m", 4, 12}, FATAL_STYLE{"FATAL", "\33[2;31m", "\33[0;31m", 32772, 4};
 
 	// Lookup tables: convert Minecraft color codes to ANSI sequences.
 	static constexpr const char *mcToAnsiEscape[]{
@@ -367,7 +366,7 @@ private:
 		}
 
 		// Pack date components into a compact unsigned integer representation.
-		static unsigned packDate(const tm &time) { return (time.tm_year << 16) + (time.tm_mon << 8) + time.tm_mday; }
+		static unsigned packDate(const std::tm &time) { return (time.tm_year << 16) + (time.tm_mon << 8) + time.tm_mday; }
 
 		// Update the log file handle for log rotation.
 		static void updateIfNeeded() {
@@ -407,7 +406,7 @@ private:
 
 				// Ensure log directory exists.
 				std::filesystem::create_directories(logsDirectory);
-				const tm time = TimeUtils::getLocalTime();
+				const std::tm time = TimeUtils::getLocalTime();
 				// Rename existing log file if present.
 				rotateLogFiles(time);
 				logFileCreateDate = packDate(time);
@@ -422,11 +421,11 @@ private:
 		}
 
 		// Rename the existing latest.log to a dated backup file with the format YYYY-MM-DD-N.log.
-		static void rotateLogFiles(const tm &time) {
+		static void rotateLogFiles(const std::tm &time) {
 #ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
 			if (!std::filesystem::exists(latestLog)) return;
 
-			tm fileTime{};
+			std::tm fileTime{};
 			struct stat fileStat;
 			if (stat(latestLog.string().c_str(), &fileStat)) fileTime = time;
 #ifdef _WIN32
@@ -451,9 +450,9 @@ private:
 	class TimeUtils {
 	public:
 		// Retrieve the current local time.
-		static tm getLocalTime() {
+		static std::tm getLocalTime() {
 			const time_t now = time(nullptr);
-			tm result{};
+			std::tm result{};
 #ifdef _WIN32
 			localtime_s(&result, &now);
 #else
@@ -463,7 +462,7 @@ private:
 		}
 
 		// Format time structure to %H:%M:%S string.
-		static std::wstring formatTime(const tm &time) {
+		static std::wstring formatTime(const std::tm &time) {
 			return std::format(L"{:02}:{:02}:{:02} ", time.tm_hour, time.tm_min, time.tm_sec);
 		}
 	};
@@ -495,15 +494,22 @@ private:
 		// Process single line of log message with formatting.
 		static void processSingleLine(const std::wstring &name, const std::wstring &message, const LogStyle &style) {
 			if (message.empty()) return;
-
-			printTimeStamp(name, style);
-			const std::wstring stripped = ConsoleHelper::processColorCodes(message, style.textColor, style.textAnsiColor, onLog != nullptr);
-			if (onLog) {
+			if (beforeLog) {
 				try {
-					onLog(message, stripped);
+					beforeLog();
 				} catch (...) {
 				}
 			}
+
+			printTimeStamp(name, style);
+			const std::wstring stripped = ConsoleHelper::processColorCodes(message, style.textColor, style.textAnsiColor, afterLog != nullptr);
+			if (afterLog) {
+				try {
+					afterLog(message, stripped);
+				} catch (...) {
+				}
+			}
+
 			ConsoleHelper::clearLine();
 			ConsoleHelper::flushLine();
 		}
@@ -511,7 +517,7 @@ private:
 		// Print current time and logger name (if provided).
 		static void printTimeStamp(const std::wstring &name, const LogStyle &style) {
 			// Get current local time for timestamp.
-			const tm localTime = TimeUtils::getLocalTime();
+			const std::tm localTime = TimeUtils::getLocalTime();
 
 			// Set cyan color for timestamp bracket if output is terminal.
 			if (isAtty) ConsoleHelper::setColor(3, "\33[0;36m");
@@ -571,8 +577,10 @@ private:
 	static inline std::atomic_bool lockFlag;
 	// Log task queue, stores log tasks to be processed by the logging thread.
 	static inline std::queue<LogTask> logQueue;
+	// Code to execute before a log message has been output.
+	static inline std::function<void()> beforeLog;
 	// Code to execute after a log message has been output.
-	static inline std::function<void(const std::wstring &, const std::wstring &)> onLog;
+	static inline std::function<void(const std::wstring&, const std::wstring&)> afterLog;
 	// Detect whether the process has a terminal.
 	// If not (e.g., output redirected to a file), console output will be disabled.
 	static inline const bool isAtty = isatty(fileno(stderr));
@@ -670,13 +678,17 @@ public:
 	// The callback receives two parameters:
 	//   1. The original log message (may include formatting codes).
 	//   2. The plain text version of the message (with formatting removed).
-	static void setOnLog(const std::function<void(const std::wstring &, const std::wstring &)> &func) noexcept {
-		onLog = func;
+	static void setAfterLog(const std::function<void(const std::wstring &, const std::wstring &)> &func) noexcept {
+		afterLog = func;
+	}
+
+	// Register a callback function to execute before each log output.
+	static void setBeforeLog(const std::function<void()> func) noexcept {
+		beforeLog = func;
 	}
 
 private:
-	// Initialize a background thread to handle log queue processing and callbacks, ensuring it stays alive until
-	// program exit.
+	// Initialize a background thread to handle log queue processing and callbacks, ensuring it stays alive until program exit.
 	static inline std::shared_ptr<void> waiter = [] {
 		auto threadFunc = [] [[noreturn]] {
 		// Set the current thread to the lowest priority.
