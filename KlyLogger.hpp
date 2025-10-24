@@ -467,7 +467,7 @@ private:
 		}
 	};
 
-	// Log message processing
+	// Log message processing.
 	class MessageProcessor {
 	public:
 		// Process complete log message including line splitting.
@@ -509,7 +509,6 @@ private:
 				} catch (...) {
 				}
 			}
-
 			ConsoleHelper::clearLine();
 			ConsoleHelper::flushLine();
 		}
@@ -522,7 +521,7 @@ private:
 			// Set cyan color for timestamp bracket if output is terminal.
 			if (isAtty) ConsoleHelper::setColor(3, "\33[0;36m");
 
-			ConsoleHelper::write("[");
+			ConsoleHelper::write("\r[");
 			ConsoleHelper::setColor(3, "\33[0;36m");
 			// Write formatted time (HH:MM:SS).
 			ConsoleHelper::write(TimeUtils::formatTime(localTime));
@@ -558,7 +557,8 @@ private:
 	public:
 		// Spin until the lock is acquired.
 		static void acquire() {
-			for (bool expected = false; !lockFlag.compare_exchange_weak(expected, true, std::memory_order_acquire); expected = false) pauseBriefly();
+			for (bool expected = false; !lockFlag.compare_exchange_weak(expected, true, std::memory_order_acquire); expected = false)
+				pauseBriefly();
 		}
 
 		// Release the custom lock.
@@ -580,11 +580,11 @@ private:
 	// Code to execute before a log message has been output.
 	static inline std::function<void()> beforeLog;
 	// Code to execute after a log message has been output.
-	static inline std::function<void(const std::wstring&, const std::wstring&)> afterLog;
+	static inline std::function<void(const std::wstring &, const std::wstring &)> afterLog;
 	// Detect whether the process has a terminal.
 	// If not (e.g., output redirected to a file), console output will be disabled.
 	static inline const bool isAtty = isatty(fileno(stderr));
-	// Determines whether the console supports ANSI escape sequences.
+	// Determines whether the current console supports ANSI escape sequences.
 	static inline const bool ansiSupported = ConsoleHelper::initialize();
 
 #ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
@@ -622,7 +622,7 @@ private:
 
 public:
 	// Construct a logger with no name.
-	KlyLogger() noexcept : as_wstring(L"KlyLogger{name=<empty>}"), as_string("KlyLogger{name=<empty>}") {}
+	explicit KlyLogger() noexcept : as_wstring(L"KlyLogger{name=<empty>}"), as_string("KlyLogger{name=<empty>}") {}
 
 	// Construct a logger with a std::wstring name.
 	explicit KlyLogger(const std::wstring &name) noexcept :
@@ -683,12 +683,13 @@ public:
 	}
 
 	// Register a callback function to execute before each log output.
-	static void setBeforeLog(const std::function<void()> func) noexcept {
+	static void setBeforeLog(const std::function<void()> &func) noexcept {
 		beforeLog = func;
 	}
 
 private:
-	// Initialize a background thread to handle log queue processing and callbacks, ensuring it stays alive until program exit.
+	// Initialize a background thread to handle log queue processing and callbacks,
+	// ensuring it stays alive until program exit.
 	static inline std::shared_ptr<void> waiter = [] {
 		auto threadFunc = [] [[noreturn]] {
 		// Set the current thread to the lowest priority.
