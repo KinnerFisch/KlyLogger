@@ -716,7 +716,7 @@ private:
 	// Initialize a background thread to handle log queue processing and callbacks,
 	// ensuring it stays alive until program exit.
 	static inline std::shared_ptr<void> waiter = [] {
-		auto threadFunc = [] [[noreturn]] {
+		auto threadFunc = [] {
 		// Set the current thread to the lowest priority.
 #ifdef _WIN32
 			const HANDLE hThread = GetCurrentThread();
