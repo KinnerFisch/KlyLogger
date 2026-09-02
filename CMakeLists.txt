@@ -33,9 +33,9 @@ if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/fmt/include/fmt/format.h")
 		"fmt submodule is missing. Run: git submodule update --init --recursive")
 endif()
 
-# Build all four combinations so applications can select behavior when linking.
-# STATIC is intentional: no target in this project creates a DLL/shared object.
-function(kly_logger_add_variant target_name output_name no_log_file no_handle_cache)
+# Build every behavior/runtime combination so applications can select one when
+# linking. STATIC is intentional: no target creates a DLL/shared object.
+function(kly_logger_add_variant target_name output_name no_log_file no_handle_cache msvc_runtime)
 	# Compile fmt directly into every KlyLogger archive. Consumers link one
 	# KlyLogger .lib/.a and do not need a separate fmt binary.
 	add_library(${target_name} STATIC KlyLogger.cpp fmt/src/format.cc)
@@ -56,6 +56,10 @@ function(kly_logger_add_variant target_name output_name no_log_file no_handle_ca
 	endif()
 
 	if(MSVC)
+		# A static C++ archive cannot be runtime-library agnostic: KlyLogger's
+		# public API crosses the library boundary with STL types. Build explicit
+		# /MD and /MT archives so consumers can select the matching CRT.
+		set_property(TARGET ${target_name} PROPERTY MSVC_RUNTIME_LIBRARY ${msvc_runtime})
 		# fmt's Unicode support requires UTF-8 source/execution encoding in every
 		# C++ translation unit that includes KlyLogger.hpp.
 		target_compile_options(${target_name} PUBLIC /utf-8)
@@ -79,27 +83,61 @@ function(kly_logger_add_variant target_name output_name no_log_file no_handle_ca
 	endif()
 endfunction()
 
-kly_logger_add_variant(KlyLogger KlyLogger FALSE FALSE)
-kly_logger_add_variant(KlyLoggerNoLogFile KlyLoggerNoLogFile TRUE FALSE)
-kly_logger_add_variant(KlyLoggerNoOutputHandleCache KlyLoggerNoOutputHandleCache FALSE TRUE)
-kly_logger_add_variant(KlyLoggerNoLogFileNoOutputHandleCache KlyLoggerNoLogFileNoOutputHandleCache TRUE TRUE)
+if(MSVC)
+	set(KLY_LOGGER_TARGETS)
+	foreach(runtime IN ITEMS MD MT)
+		if(runtime STREQUAL MD)
+			set(runtime_library MultiThreadedDLL)
+		else()
+			set(runtime_library MultiThreaded)
+		endif()
 
-set_target_properties(KlyLogger PROPERTIES EXPORT_NAME KlyLogger)
-set_target_properties(KlyLoggerNoLogFile PROPERTIES EXPORT_NAME NoLogFile)
-set_target_properties(KlyLoggerNoOutputHandleCache PROPERTIES EXPORT_NAME NoOutputHandleCache)
-set_target_properties(KlyLoggerNoLogFileNoOutputHandleCache PROPERTIES EXPORT_NAME NoLogFileNoOutputHandleCache)
+		kly_logger_add_variant(KlyLogger_${runtime} KlyLogger_${runtime} FALSE FALSE ${runtime_library})
+		kly_logger_add_variant(KlyLoggerNoLogFile_${runtime} KlyLoggerNoLogFile_${runtime} TRUE FALSE ${runtime_library})
+		kly_logger_add_variant(KlyLoggerNoOutputHandleCache_${runtime} KlyLoggerNoOutputHandleCache_${runtime} FALSE TRUE ${runtime_library})
+		kly_logger_add_variant(KlyLoggerNoLogFileNoOutputHandleCache_${runtime} KlyLoggerNoLogFileNoOutputHandleCache_${runtime} TRUE TRUE ${runtime_library})
 
-add_library(KlyLogger::KlyLogger ALIAS KlyLogger)
-add_library(KlyLogger::NoLogFile ALIAS KlyLoggerNoLogFile)
-add_library(KlyLogger::NoOutputHandleCache ALIAS KlyLoggerNoOutputHandleCache)
-add_library(KlyLogger::NoLogFileNoOutputHandleCache ALIAS KlyLoggerNoLogFileNoOutputHandleCache)
+		set_target_properties(KlyLogger_${runtime} PROPERTIES EXPORT_NAME KlyLogger_${runtime})
+		set_target_properties(KlyLoggerNoLogFile_${runtime} PROPERTIES EXPORT_NAME NoLogFile_${runtime})
+		set_target_properties(KlyLoggerNoOutputHandleCache_${runtime} PROPERTIES EXPORT_NAME NoOutputHandleCache_${runtime})
+		set_target_properties(KlyLoggerNoLogFileNoOutputHandleCache_${runtime} PROPERTIES EXPORT_NAME NoLogFileNoOutputHandleCache_${runtime})
+
+		add_library(KlyLogger::KlyLogger_${runtime} ALIAS KlyLogger_${runtime})
+		add_library(KlyLogger::NoLogFile_${runtime} ALIAS KlyLoggerNoLogFile_${runtime})
+		add_library(KlyLogger::NoOutputHandleCache_${runtime} ALIAS KlyLoggerNoOutputHandleCache_${runtime})
+		add_library(KlyLogger::NoLogFileNoOutputHandleCache_${runtime} ALIAS KlyLoggerNoLogFileNoOutputHandleCache_${runtime})
+
+		list(APPEND KLY_LOGGER_TARGETS
+			KlyLogger_${runtime}
+			KlyLoggerNoLogFile_${runtime}
+			KlyLoggerNoOutputHandleCache_${runtime}
+			KlyLoggerNoLogFileNoOutputHandleCache_${runtime})
+	endforeach()
+else()
+	kly_logger_add_variant(KlyLogger KlyLogger FALSE FALSE "")
+	kly_logger_add_variant(KlyLoggerNoLogFile KlyLoggerNoLogFile TRUE FALSE "")
+	kly_logger_add_variant(KlyLoggerNoOutputHandleCache KlyLoggerNoOutputHandleCache FALSE TRUE "")
+	kly_logger_add_variant(KlyLoggerNoLogFileNoOutputHandleCache KlyLoggerNoLogFileNoOutputHandleCache TRUE TRUE "")
+
+	set_target_properties(KlyLogger PROPERTIES EXPORT_NAME KlyLogger)
+	set_target_properties(KlyLoggerNoLogFile PROPERTIES EXPORT_NAME NoLogFile)
+	set_target_properties(KlyLoggerNoOutputHandleCache PROPERTIES EXPORT_NAME NoOutputHandleCache)
+	set_target_properties(KlyLoggerNoLogFileNoOutputHandleCache PROPERTIES EXPORT_NAME NoLogFileNoOutputHandleCache)
+
+	add_library(KlyLogger::KlyLogger ALIAS KlyLogger)
+	add_library(KlyLogger::NoLogFile ALIAS KlyLoggerNoLogFile)
+	add_library(KlyLogger::NoOutputHandleCache ALIAS KlyLoggerNoOutputHandleCache)
+	add_library(KlyLogger::NoLogFileNoOutputHandleCache ALIAS KlyLoggerNoLogFileNoOutputHandleCache)
+
+	set(KLY_LOGGER_TARGETS
+		KlyLogger
+		KlyLoggerNoLogFile
+		KlyLoggerNoOutputHandleCache
+		KlyLoggerNoLogFileNoOutputHandleCache)
+endif()
 
 include(GNUInstallDirs)
-install(TARGETS
-	KlyLogger
-	KlyLoggerNoLogFile
-	KlyLoggerNoOutputHandleCache
-	KlyLoggerNoLogFileNoOutputHandleCache
+install(TARGETS ${KLY_LOGGER_TARGETS}
 	EXPORT KlyLoggerTargets
 	ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
 install(FILES KlyLogger.hpp KlyLogger.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})

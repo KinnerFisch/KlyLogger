@@ -122,21 +122,33 @@ cmake -S . -B build
 cmake --build build --config Release
 ```
 
-With CMake, link the selected target directly / 使用 CMake 时直接链接所选目标:
+With CMake, link the selected target directly.
+On Windows, select the target whose suffix matches the application's runtime library (`/MD` or `/MT`).
+
+使用 CMake 时直接链接所选目标。
+Windows 下请选择后缀与应用程序运行库 (`/MD` 或 `/MT`) 匹配的目标。
 
 ```cmake
 add_subdirectory(path/to/KlyLogger)
-target_link_libraries(your_target PRIVATE KlyLogger::KlyLogger)
+if(MSVC)
+    target_link_libraries(your_target PRIVATE KlyLogger::KlyLogger_MD) # /MD
+    # target_link_libraries(your_target PRIVATE KlyLogger::KlyLogger_MT) # /MT
+else()
+    target_link_libraries(your_target PRIVATE KlyLogger::KlyLogger)
+endif()
 ```
 
-All four combinations are built together / 四种组合会同时生成:
+All combinations are built together. Each Windows row produces both suffixes.
+Linux keeps the original names.
 
-| Log file / 日志文件 | Handle cache / 句柄缓存 | CMake target | Windows | Linux |
+所有组合会同时生成。Windows 下每行都会生成 MD、MT 两份，Linux 保持原名。
+
+| Log file / 日志文件 | Handle cache / 句柄缓存 | Windows CMake targets | Windows libraries | Linux target / archive |
 |---|---|---|---|---|
-| Enabled / 启用 | Enabled / 启用 | `KlyLogger::KlyLogger` | `KlyLogger.lib` | `libKlyLogger.a` |
-| Disabled / 禁用 | Enabled / 启用 | `KlyLogger::NoLogFile` | `KlyLoggerNoLogFile.lib` | `libKlyLoggerNoLogFile.a` |
-| Enabled / 启用 | Disabled / 禁用 | `KlyLogger::NoOutputHandleCache` | `KlyLoggerNoOutputHandleCache.lib` | `libKlyLoggerNoOutputHandleCache.a` |
-| Disabled / 禁用 | Disabled / 禁用 | `KlyLogger::NoLogFileNoOutputHandleCache` | `KlyLoggerNoLogFileNoOutputHandleCache.lib` | `libKlyLoggerNoLogFileNoOutputHandleCache.a` |
+| Enabled / 启用 | Enabled / 启用 | `KlyLogger::KlyLogger_MD`, `KlyLogger::KlyLogger_MT` | `KlyLogger_MD.lib`, `KlyLogger_MT.lib` | `KlyLogger::KlyLogger` / `libKlyLogger.a` |
+| Disabled / 禁用 | Enabled / 启用 | `KlyLogger::NoLogFile_MD`, `KlyLogger::NoLogFile_MT` | `KlyLoggerNoLogFile_MD.lib`, `KlyLoggerNoLogFile_MT.lib` | `KlyLogger::NoLogFile` / `libKlyLoggerNoLogFile.a` |
+| Enabled / 启用 | Disabled / 禁用 | `KlyLogger::NoOutputHandleCache_MD`, `KlyLogger::NoOutputHandleCache_MT` | `KlyLoggerNoOutputHandleCache_MD.lib`, `KlyLoggerNoOutputHandleCache_MT.lib` | `KlyLogger::NoOutputHandleCache` / `libKlyLoggerNoOutputHandleCache.a` |
+| Disabled / 禁用 | Disabled / 禁用 | `KlyLogger::NoLogFileNoOutputHandleCache_MD`, `KlyLogger::NoLogFileNoOutputHandleCache_MT` | `KlyLoggerNoLogFileNoOutputHandleCache_MD.lib`, `KlyLoggerNoLogFileNoOutputHandleCache_MT.lib` | `KlyLogger::NoLogFileNoOutputHandleCache` / `libKlyLoggerNoLogFileNoOutputHandleCache.a` |
 
 Output-handle caching is a Windows-specific behavior. The corresponding Linux archives are still generated so release packages have the same four-name layout on every platform.
 
