@@ -202,7 +202,7 @@ public:
 	// Set the text color for current console output.
 	void setColor(const uint16_t color, const std::string &ansi) {
 		if (!isAtty_) return;
-		if (ansiSupported_) lineBuffer_ += KlyLogger::StringConverter::toWString(ansi.begin(), ansi.end());
+		if (ansiSupported_) lineBuffer_ += std::wstring(ansi.begin(), ansi.end());
 #ifdef _WIN32
 		else SetConsoleTextAttribute(getHandle(), color);
 #endif
@@ -211,7 +211,7 @@ public:
 	// Output a narrow string to the console and log file.
 	void write(const std::string &message) {
 		if (isAtty_) {
-			if (ansiSupported_) lineBuffer_ += KlyLogger::StringConverter::toWString(message.begin(), message.end());
+			if (ansiSupported_) lineBuffer_ += std::wstring(message.begin(), message.end());
 #ifdef _WIN32
 			else WriteConsoleA(getHandle(), message.c_str(), static_cast<DWORD>(message.length()), nullptr, nullptr);
 #endif
@@ -569,32 +569,45 @@ static std::wstring legalizeLoggerName(const std::wstring &loggerName) {
 }
 
 std::string KlyLogger::StringConverter::toString(const std::wstring &str) {
-	return converter.to_bytes(str);
+	size_t length = 0;
+	// Query the required output length before allocating the narrow string.
+#ifdef _WIN32
+	if (wcstombs_s(&length, nullptr, 0, str.c_str(), 0))
+#else
+	length = wcstombs(nullptr, str.c_str(), 0);
+	if (length == static_cast<size_t>(-1))
+#endif
+		return { str.begin(), str.end() };
+	std::string result(length, '\0');
+	// Convert the wide string with the exact required allocation.
+#ifdef _WIN32
+	if (wcstombs_s(&length, result.data(), length, str.c_str(), _TRUNCATE))
+#else
+	if (wcstombs(result.data(), str.c_str(), length + 1) == static_cast<size_t>(-1))
+#endif
+		return { str.begin(), str.end() };
+	return result;
 }
 
 std::wstring KlyLogger::StringConverter::toWString(const std::string &str) {
+	size_t length = 0;
+	// Query the required output length before allocating the wide string.
 #ifdef _WIN32
-	// On Windows, try the active system code page first. MB_ERR_INVALID_CHARS ensures invalid character sequences cause conversion failure.
-	if (!str.empty()) {
-		// Query the required output length before allocating the wide string.
-		const int length = MultiByteToWideChar(CP_ACP, MB_ERR_INVALID_CHARS, str.data(), static_cast<int>(str.size()), nullptr, 0);
-		if (length > 0) {
-			// Convert the narrow string with the exact required allocation.
-			std::wstring result(static_cast<std::size_t>(length), L'\0');
-			MultiByteToWideChar(CP_ACP, MB_ERR_INVALID_CHARS, str.data(), static_cast<int>(str.size()), result.data(), length);
-			// Return the successfully converted wide string.
-			return result;
-		}
-	}
+	if (mbstowcs_s(&length, nullptr, 0, str.c_str(), 0))
+#else
+	length = mbstowcs(nullptr, str.c_str(), 0);
+	if (length == static_cast<size_t>(-1))
 #endif
-	try {
-		// Fallback: interpret the narrow string as UTF-8.
-		return converter.from_bytes(str);
-	} catch (const std::exception &error) {
-		// If decoding fails, preserve the original bytes and append an error message instead of discarding the log content.
-		const char *what = error.what();
-		return toWString(str.begin(), str.end()) + L"\xa78\xa7o (decoder error: " + toWString(what, what + std::strlen(what)) + L')';
-	}
+		return { str.begin(), str.end() };
+	std::wstring result(length, '\0');
+	// Convert the wide string with the exact required allocation.
+#ifdef _WIN32
+	if (mbstowcs_s(&length, result.data(), length, str.c_str(), _TRUNCATE))
+#else
+	if (mbstowcs(result.data(), str.c_str(), length + 1) == static_cast<size_t>(-1))
+#endif
+		return { str.begin(), str.end() };
+	return result;
 }
 
 void KlyLogger::StringConverter::clearConverted() {
@@ -638,8 +651,7 @@ static std::wstring formatCMessage(const std::wstring &format, const KlyLoggerFo
 		if (!arguments && argumentCount != 0) throw fmt::format_error("Format arguments are null");
 		fmt::dynamic_format_arg_store<fmt::wformat_context> store;
 		for (std::size_t index = 0; index < argumentCount; ++index) {
-			const KlyLoggerFormatArg &argument = arguments[index];
-			switch (argument.type) {
+			switch (const KlyLoggerFormatArg &argument = arguments[index]; argument.type) {
 			case KLY_LOGGER_FORMAT_SIGNED_INTEGER:
 				store.push_back(argument.value.signed_integer);
 				break;
@@ -701,7 +713,7 @@ static void logCFormatted(const KlyLogger &logger, const CLogLevel level, const 
 }
 
 // Private C-handle representation that owns the public C++ logger object.
-struct _KlyLoggerHandle {
+struct KlyLoggerHandleStruct {
 	KlyLogger logger;
 };
 
@@ -710,7 +722,7 @@ extern "C" {
 
 KlyLoggerHandle kly_logger_create() {
 	try {
-		return new _KlyLoggerHandle{ {} };
+		return new KlyLoggerHandleStruct{ {} };
 	} catch (...) {
 		return nullptr;
 	}
@@ -718,7 +730,7 @@ KlyLoggerHandle kly_logger_create() {
 
 KlyLoggerHandle kly_logger_create_named(const wchar_t *name) {
 	try {
-		return new _KlyLoggerHandle{ std::wstring(name ? name : L"") };
+		return new KlyLoggerHandleStruct{ std::wstring(name ? name : L"") };
 	} catch (...) {
 		return nullptr;
 	}
@@ -726,7 +738,7 @@ KlyLoggerHandle kly_logger_create_named(const wchar_t *name) {
 
 KlyLoggerHandle kly_logger_create_named_narrow(const char *name) {
 	try {
-		return new _KlyLoggerHandle{ std::string(name ? name : "") };
+		return new KlyLoggerHandleStruct{ std::string(name ? name : "") };
 	} catch (...) {
 		return nullptr;
 	}

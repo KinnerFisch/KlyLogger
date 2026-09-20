@@ -29,11 +29,6 @@
 #ifndef KLY_LOGGER_INCLUDED
 #define KLY_LOGGER_INCLUDED
 
-#ifndef _SILENCE_CXX17_CODECVT_HEADER_DEPRECATION_WARNING
-#define _SILENCE_CXX17_CODECVT_HEADER_DEPRECATION_WARNING
-#endif
-
-#include <codecvt>
 #include <exception>
 #include <functional>
 #include <locale>
@@ -72,9 +67,6 @@ public:
 	// String conversion utilities.
 	class StringConverter {
 	public:
-		// Cross-platform string encoding converter.
-		static inline std::wstring_convert<std::codecvt_utf8<wchar_t>> converter;
-
 		// Cache used when converting arguments for log tasks (prevents loss of converted data or incorrect log output).
 		static inline std::queue<std::wstring> converted;
 
@@ -83,9 +75,6 @@ public:
 
 		// Convert narrow string to wide string safely.
 		static std::wstring toWString(const std::string &str);
-
-		// Convert narrow string to wide string directly.
-		static std::wstring toWString(const auto &from, const auto &to) { return std::wstring(from, to); }
 
 		// Helper to normalize different argument types into wide strings.
 		// Handles std::string, const char*, and custom types with string()/wstring().

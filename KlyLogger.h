@@ -32,6 +32,7 @@
 #define KLY_LOGGER_C_INCLUDED
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -39,7 +40,7 @@ extern "C" {
 #endif
 
 // Opaque logger handle. Its C++ implementation is private to KlyLogger.cpp.
-typedef struct _KlyLoggerHandle * KlyLoggerHandle;
+typedef const struct KlyLoggerHandleStruct * KlyLoggerHandle;
 
 // Code to execute before a log message has been output.
 typedef void (*KlyLoggerBeforeLogCallback)();
@@ -79,67 +80,67 @@ typedef struct KlyLoggerFormatArg {
 	} value;
 } KlyLoggerFormatArg;
 
-static KlyLoggerFormatArg kly_logger_arg_signed(const int64_t value) {
-	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_SIGNED_INTEGER };
+inline KlyLoggerFormatArg kly_logger_arg_signed(const int64_t value) {
+	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_SIGNED_INTEGER, { 0 } };
 	result.value.signed_integer = value;
 	return result;
 }
 
-static KlyLoggerFormatArg kly_logger_arg_unsigned(const uint64_t value) {
-	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_UNSIGNED_INTEGER };
+inline KlyLoggerFormatArg kly_logger_arg_unsigned(const uint64_t value) {
+	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_UNSIGNED_INTEGER, { 0 } };
 	result.value.unsigned_integer = value;
 	return result;
 }
 
-static KlyLoggerFormatArg kly_logger_arg_double(const double value) {
-	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_FLOATING_POINT };
+inline KlyLoggerFormatArg kly_logger_arg_double(const double value) {
+	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_FLOATING_POINT, { 0 } };
 	result.value.floating_point = value;
 	return result;
 }
 
-static KlyLoggerFormatArg kly_logger_arg_long_double(const long double value) {
-	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_LONG_DOUBLE };
+inline KlyLoggerFormatArg kly_logger_arg_long_double(const long double value) {
+	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_LONG_DOUBLE, { 0 } };
 	result.value.long_double_value = value;
 	return result;
 }
 
-static KlyLoggerFormatArg kly_logger_arg_bool(const bool value) {
-	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_BOOLEAN };
+inline KlyLoggerFormatArg kly_logger_arg_bool(const bool value) {
+	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_BOOLEAN, { 0 } };
 	result.value.boolean = value;
 	return result;
 }
 
-static KlyLoggerFormatArg kly_logger_arg_char(const char value) {
-	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_CHARACTER };
+inline KlyLoggerFormatArg kly_logger_arg_char(const char value) {
+	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_CHARACTER, { 0 } };
 	result.value.character = value;
 	return result;
 }
 
-static KlyLoggerFormatArg kly_logger_arg_wchar(const wchar_t value) {
-	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_WIDE_CHARACTER };
+inline KlyLoggerFormatArg kly_logger_arg_wchar(const wchar_t value) {
+	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_WIDE_CHARACTER, { 0 } };
 	result.value.wide_character = value;
 	return result;
 }
 
-static KlyLoggerFormatArg kly_logger_arg_string(const char *value) {
-	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_STRING };
+inline KlyLoggerFormatArg kly_logger_arg_string(const char *value) {
+	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_STRING, { 0 } };
 	result.value.string = value;
 	return result;
 }
 
-static KlyLoggerFormatArg kly_logger_arg_wstring(const wchar_t *value) {
-	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_WIDE_STRING };
+inline KlyLoggerFormatArg kly_logger_arg_wstring(const wchar_t *value) {
+	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_WIDE_STRING, { 0 } };
 	result.value.wide_string = value;
 	return result;
 }
 
-static KlyLoggerFormatArg kly_logger_arg_pointer(const void *value) {
-	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_POINTER };
+inline KlyLoggerFormatArg kly_logger_arg_pointer(const void *value) {
+	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_POINTER, { 0 } };
 	result.value.pointer = value;
 	return result;
 }
 
-static KlyLoggerFormatArg kly_logger_arg_identity(const KlyLoggerFormatArg value) { return value; }
+inline KlyLoggerFormatArg kly_logger_arg_identity(const KlyLoggerFormatArg value) { return value; }
 
 #define KLY_INT_ARG(value) kly_logger_arg_signed((int64_t)(value))
 #define KLY_UINT_ARG(value) kly_logger_arg_unsigned((uint64_t)(value))
