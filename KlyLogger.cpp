@@ -350,8 +350,7 @@ private:
 			{ L'n', { static_cast<uint16_t>(attribute | 0x8000), "\33[4m" } },
 			{ L'o', { attribute, "\33[3m" } },
 			{ L'r', { initialColor, ansiColor } } };
-		const auto found = mappings.find(code);
-		if (found != mappings.end()) setColor(found->second.first, found->second.second);
+		if (const auto found = mappings.find(code); found != mappings.end()) setColor(found->second.first, found->second.second);
 	}
 
 #ifdef _WIN32
@@ -431,10 +430,6 @@ public:
 private:
 	// Process log tasks until runtime shutdown.
 	void run() {
-#ifdef _WIN32
-		// Set the logging thread to the lowest priority.
-		SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_IDLE);
-#endif
 #ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
 		console_.initializeLogFile();
 #endif
@@ -442,20 +437,17 @@ private:
 		// Keep the worker alive until process shutdown, sleeping while the queue is empty instead of busy-waiting.
 		while (true) {
 			LogTask task;
-			std::function<void()> before;
-			std::function<void(const std::wstring &, const std::wstring &)> after;
 			{
 				std::unique_lock lock(mutex_);
 				workAvailable_.wait(lock, [this] { return stopping_ || !queue_.empty(); });
 				if (stopping_ && queue_.empty()) return;
 				task = std::move(queue_.front());
 				queue_.pop();
+				std::erase(task.message, 0);
 				processing_ = true;
-				before = beforeLog_;
-				after = afterLog_;
 			}
 
-			processMessage(task, before, after);
+			processMessage(task);
 
 			{
 				std::lock_guard lock(mutex_);
@@ -466,16 +458,14 @@ private:
 	}
 
 	// Process a complete log message, including line splitting.
-	void processMessage(const LogTask &task,
-		const std::function<void()> &before,
-		const std::function<void(const std::wstring &, const std::wstring &)> &after) {
+	void processMessage(const LogTask &task) {
 		std::wstring message = task.message;
 		std::size_t newlinePosition;
 		while ((newlinePosition = findNextNewline(message)) != std::wstring::npos) {
-			processSingleLine(task.name, message.substr(0, newlinePosition), task.style, before, after);
+			processSingleLine(task.name, message.substr(0, newlinePosition), task.style);
 			message = message.substr(newlinePosition + 1);
 		}
-		if (!message.empty()) processSingleLine(task.name, message, task.style, before, after);
+		if (!message.empty()) processSingleLine(task.name, message, task.style);
 	}
 
 	// Find the position of the next CR or LF newline character.
@@ -488,12 +478,15 @@ private:
 	}
 
 	// Process one non-empty log line with callbacks and formatting.
-	void processSingleLine(const std::wstring &name,
-		const std::wstring &message,
-		const KlyLogger::LogStyle &style,
-		const std::function<void()> &before,
-		const std::function<void(const std::wstring &, const std::wstring &)> &after) {
+	void processSingleLine(const std::wstring &name, const std::wstring &message, const KlyLogger::LogStyle &style) {
 		if (message.empty()) return;
+		std::function<void()> before;
+		std::function<void(const std::wstring &, const std::wstring &)> after;
+		{
+			std::lock_guard lock(mutex_);
+			before = beforeLog_;
+			after = afterLog_;
+		}
 		if (before) {
 			try {
 				before();
@@ -578,7 +571,7 @@ std::string KlyLogger::StringConverter::toString(const std::wstring &str) {
 	if (length == static_cast<size_t>(-1))
 #endif
 		return { str.begin(), str.end() };
-	std::string result(length, '\0');
+	std::string result(--length, 0);
 	// Convert the wide string with the exact required allocation.
 #ifdef _WIN32
 	if (wcstombs_s(&length, result.data(), length, str.c_str(), _TRUNCATE))
@@ -599,7 +592,7 @@ std::wstring KlyLogger::StringConverter::toWString(const std::string &str) {
 	if (length == static_cast<size_t>(-1))
 #endif
 		return { str.begin(), str.end() };
-	std::wstring result(length, '\0');
+	std::wstring result(--length, 0);
 	// Convert the wide string with the exact required allocation.
 #ifdef _WIN32
 	if (mbstowcs_s(&length, result.data(), length, str.c_str(), _TRUNCATE))
@@ -668,7 +661,7 @@ static std::wstring formatCMessage(const std::wstring &format, const KlyLoggerFo
 				store.push_back(argument.value.boolean);
 				break;
 			case KLY_LOGGER_FORMAT_CHARACTER:
-				store.push_back(static_cast<wchar_t>(static_cast<unsigned char>(argument.value.character)));
+				store.push_back(static_cast<wchar_t>(argument.value.character));
 				break;
 			case KLY_LOGGER_FORMAT_WIDE_CHARACTER:
 				store.push_back(argument.value.wide_character);
@@ -688,7 +681,7 @@ static std::wstring formatCMessage(const std::wstring &format, const KlyLoggerFo
 		}
 		return fmt::vformat(fmt::wstring_view(format), store);
 	} catch (const std::exception &error) {
-		return format + L"\xa78\xa7o (" + KlyLogger::StringConverter::toWString(error.what()) + L')';
+		return format + L"\xa78\247o (" + KlyLogger::StringConverter::toWString(error.what()) + L')';
 	}
 }
 
