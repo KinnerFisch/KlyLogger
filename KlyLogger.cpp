@@ -565,18 +565,18 @@ std::string KlyLogger::StringConverter::toString(const std::wstring &str) {
 	size_t length = 0;
 	// Query the required output length before allocating the narrow string.
 #ifdef _WIN32
-	if (wcstombs_s(&length, nullptr, 0, str.c_str(), 0))
+	if (wcstombs_s(&length, nullptr, 0, str.c_str(), 0)) return { str.begin(), str.end() };
+	--length;
 #else
 	length = wcstombs(nullptr, str.c_str(), 0);
-	if (length == static_cast<size_t>(-1))
+	if (length == static_cast<size_t>(-1)) return { str.begin(), str.end() };
 #endif
-		return { str.begin(), str.end() };
-	std::string result(--length, 0);
+	std::string result(length, 0);
 	// Convert the wide string with the exact required allocation.
 #ifdef _WIN32
 	if (wcstombs_s(&length, result.data(), length, str.c_str(), _TRUNCATE))
 #else
-	if (wcstombs(result.data(), str.c_str(), length + 1) == static_cast<size_t>(-1))
+	if (wcstombs(result.data(), str.c_str(), length) == static_cast<size_t>(-1))
 #endif
 		return { str.begin(), str.end() };
 	return result;
@@ -586,18 +586,18 @@ std::wstring KlyLogger::StringConverter::toWString(const std::string &str) {
 	size_t length = 0;
 	// Query the required output length before allocating the wide string.
 #ifdef _WIN32
-	if (mbstowcs_s(&length, nullptr, 0, str.c_str(), 0))
+	if (mbstowcs_s(&length, nullptr, 0, str.c_str(), 0)) return { str.begin(), str.end() };
+	--length;
 #else
 	length = mbstowcs(nullptr, str.c_str(), 0);
-	if (length == static_cast<size_t>(-1))
+	if (length == static_cast<size_t>(-1)) return { str.begin(), str.end() };
 #endif
-		return { str.begin(), str.end() };
-	std::wstring result(--length, 0);
+	std::wstring result(length, 0);
 	// Convert the wide string with the exact required allocation.
 #ifdef _WIN32
 	if (mbstowcs_s(&length, result.data(), length, str.c_str(), _TRUNCATE))
 #else
-	if (mbstowcs(result.data(), str.c_str(), length + 1) == static_cast<size_t>(-1))
+	if (mbstowcs(result.data(), str.c_str(), length) == static_cast<size_t>(-1))
 #endif
 		return { str.begin(), str.end() };
 	return result;
