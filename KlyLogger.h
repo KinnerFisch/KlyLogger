@@ -39,6 +39,12 @@
 extern "C" {
 #endif
 
+#ifdef __cplusplus
+#define KLY_LOGGER_DETAIL_INLINE inline
+#else
+#define KLY_LOGGER_DETAIL_INLINE static inline
+#endif
+
 // Opaque logger handle. Its C++ implementation is private to KlyLogger.cpp.
 typedef const struct KlyLoggerHandleStruct * KlyLoggerHandle;
 
@@ -80,67 +86,67 @@ typedef struct KlyLoggerFormatArg {
 	} value;
 } KlyLoggerFormatArg;
 
-inline KlyLoggerFormatArg kly_logger_arg_signed(const int64_t value) {
+KLY_LOGGER_DETAIL_INLINE KlyLoggerFormatArg kly_logger_arg_signed(const int64_t value) {
 	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_SIGNED_INTEGER, { 0 } };
 	result.value.signed_integer = value;
 	return result;
 }
 
-inline KlyLoggerFormatArg kly_logger_arg_unsigned(const uint64_t value) {
+KLY_LOGGER_DETAIL_INLINE KlyLoggerFormatArg kly_logger_arg_unsigned(const uint64_t value) {
 	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_UNSIGNED_INTEGER, { 0 } };
 	result.value.unsigned_integer = value;
 	return result;
 }
 
-inline KlyLoggerFormatArg kly_logger_arg_double(const double value) {
+KLY_LOGGER_DETAIL_INLINE KlyLoggerFormatArg kly_logger_arg_double(const double value) {
 	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_FLOATING_POINT, { 0 } };
 	result.value.floating_point = value;
 	return result;
 }
 
-inline KlyLoggerFormatArg kly_logger_arg_long_double(const long double value) {
+KLY_LOGGER_DETAIL_INLINE KlyLoggerFormatArg kly_logger_arg_long_double(const long double value) {
 	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_LONG_DOUBLE, { 0 } };
 	result.value.long_double_value = value;
 	return result;
 }
 
-inline KlyLoggerFormatArg kly_logger_arg_bool(const bool value) {
+KLY_LOGGER_DETAIL_INLINE KlyLoggerFormatArg kly_logger_arg_bool(const bool value) {
 	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_BOOLEAN, { 0 } };
 	result.value.boolean = value;
 	return result;
 }
 
-inline KlyLoggerFormatArg kly_logger_arg_char(const char value) {
+KLY_LOGGER_DETAIL_INLINE KlyLoggerFormatArg kly_logger_arg_char(const char value) {
 	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_CHARACTER, { 0 } };
 	result.value.character = value;
 	return result;
 }
 
-inline KlyLoggerFormatArg kly_logger_arg_wchar(const wchar_t value) {
+KLY_LOGGER_DETAIL_INLINE KlyLoggerFormatArg kly_logger_arg_wchar(const wchar_t value) {
 	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_WIDE_CHARACTER, { 0 } };
 	result.value.wide_character = value;
 	return result;
 }
 
-inline KlyLoggerFormatArg kly_logger_arg_string(const char *value) {
+KLY_LOGGER_DETAIL_INLINE KlyLoggerFormatArg kly_logger_arg_string(const char *value) {
 	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_STRING, { 0 } };
 	result.value.string = value;
 	return result;
 }
 
-inline KlyLoggerFormatArg kly_logger_arg_wstring(const wchar_t *value) {
+KLY_LOGGER_DETAIL_INLINE KlyLoggerFormatArg kly_logger_arg_wstring(const wchar_t *value) {
 	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_WIDE_STRING, { 0 } };
 	result.value.wide_string = value;
 	return result;
 }
 
-inline KlyLoggerFormatArg kly_logger_arg_pointer(const void *value) {
+KLY_LOGGER_DETAIL_INLINE KlyLoggerFormatArg kly_logger_arg_pointer(const void *value) {
 	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_POINTER, { 0 } };
 	result.value.pointer = value;
 	return result;
 }
 
-inline KlyLoggerFormatArg kly_logger_arg_identity(const KlyLoggerFormatArg value) { return value; }
+KLY_LOGGER_DETAIL_INLINE KlyLoggerFormatArg kly_logger_arg_identity(const KlyLoggerFormatArg value) { return value; }
 
 #define KLY_INT_ARG(value) kly_logger_arg_signed((int64_t)(value))
 #define KLY_UINT_ARG(value) kly_logger_arg_unsigned((uint64_t)(value))
@@ -152,6 +158,8 @@ inline KlyLoggerFormatArg kly_logger_arg_identity(const KlyLoggerFormatArg value
 #define KLY_STRING_ARG(value) kly_logger_arg_string((value))
 #define KLY_WSTRING_ARG(value) kly_logger_arg_wstring((value))
 #define KLY_POINTER_ARG(value) kly_logger_arg_pointer((const void *)(value))
+
+#undef KLY_LOGGER_DETAIL_INLINE
 
 #ifndef __cplusplus
 // C11 type selector used automatically by the logging convenience macros.
@@ -198,6 +206,8 @@ KlyLoggerHandle kly_logger_create();
 KlyLoggerHandle kly_logger_create_named(const wchar_t *name);
 // Construct a logger with a narrow string name.
 KlyLoggerHandle kly_logger_create_named_narrow(const char *name);
+// Destroy a logger handle. Pending log tasks retain the logger's callback snapshots.
+void kly_logger_destroy(KlyLoggerHandle logger);
 
 // Retrieve the logger description as a narrow string. The returned pointer is owned by the logger and remains valid until that logger is destroyed.
 const char *kly_logger_string(KlyLoggerHandle logger);
@@ -233,8 +243,8 @@ bool kly_logger_finished_tasks();
 // Block the current thread until all log output is complete.
 void kly_logger_wait();
 // Register callbacks that run before or after each output line. Pass NULL to clear the corresponding callback.
-void kly_logger_set_before_log(KlyLoggerBeforeLogCallback callback);
-void kly_logger_set_after_log(KlyLoggerAfterLogCallback callback);
+void kly_logger_set_before_log(KlyLoggerHandle logger, KlyLoggerBeforeLogCallback callback);
+void kly_logger_set_after_log(KlyLoggerHandle logger, KlyLoggerAfterLogCallback callback);
 
 #ifdef __cplusplus
 }
@@ -242,15 +252,13 @@ void kly_logger_set_after_log(KlyLoggerAfterLogCallback callback);
 typedef KlyLoggerHandle KlyLogger;
 
 // C cannot recover argument types from a raw va_list: unlike printf's %d/%ls,
-// a {} field does not encode a type. These C11 macros provide the same call
-// shape while using _Generic to preserve each type and deriving the count at
-// compile time. Up to 16 formatting arguments are accepted per call.
+// a {} field does not encode a type. These C11 macros provide the same call shape
+// while using _Generic to preserve each type and deriving the count at compile time.
+// Up to 16 formatting arguments are accepted per call.
 #define KLY_LOGGER_DETAIL_CAT_RAW(left, right) left##right
 #define KLY_LOGGER_DETAIL_CAT(left, right) KLY_LOGGER_DETAIL_CAT_RAW(left, right)
-#define KLY_LOGGER_DETAIL_COUNT_RAW( \
-	_1, _2, _3, _4, _5, _6, _7, _8, _9, _10, _11, _12, _13, _14, _15, _16, _17, _18, count, ...) count
-#define KLY_LOGGER_DETAIL_COUNT(...) KLY_LOGGER_DETAIL_COUNT_RAW(__VA_ARGS__, \
-	18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0)
+#define KLY_LOGGER_DETAIL_COUNT_RAW(_1, _2, _3, _4, _5, _6, _7, _8, _9, _10, _11, _12, _13, _14, _15, _16, _17, _18, count, ...) count
+#define KLY_LOGGER_DETAIL_COUNT(...) KLY_LOGGER_DETAIL_COUNT_RAW(__VA_ARGS__, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0)
 
 #define KLY_LOGGER_DETAIL_MAP_1(a1) KLY_ARG(a1)
 #define KLY_LOGGER_DETAIL_MAP_2(a1, a2) KLY_ARG(a1), KLY_LOGGER_DETAIL_MAP_1(a2)
@@ -270,11 +278,8 @@ typedef KlyLoggerHandle KlyLogger;
 #define KLY_LOGGER_DETAIL_MAP_16(a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16) KLY_ARG(a1), KLY_LOGGER_DETAIL_MAP_15(a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16)
 #define KLY_LOGGER_DETAIL_MAP(count, ...) KLY_LOGGER_DETAIL_CAT(KLY_LOGGER_DETAIL_MAP_, count)(__VA_ARGS__)
 
-#define KLY_LOGGER_DETAIL_FORMAT(format_function, logger, format, count, ...) \
-	(format_function)((logger), (format), \
-		(const KlyLoggerFormatArg[]){KLY_LOGGER_DETAIL_MAP(count, __VA_ARGS__)}, (size_t)(count))
-#define KLY_LOGGER_DETAIL_CALL_2(message_function, format_function, logger, message) \
-	(message_function)((logger), (message))
+#define KLY_LOGGER_DETAIL_FORMAT(format_function, logger, format, count, ...) (format_function)((logger), (format), (const KlyLoggerFormatArg[]){ KLY_LOGGER_DETAIL_MAP(count, __VA_ARGS__) }, (size_t)(count))
+#define KLY_LOGGER_DETAIL_CALL_2(message_function, format_function, logger, message) (message_function)((logger), (message))
 #define KLY_LOGGER_DETAIL_CALL_3(message_function, format_function, logger, format, ...) KLY_LOGGER_DETAIL_FORMAT(format_function, logger, format, 1, __VA_ARGS__)
 #define KLY_LOGGER_DETAIL_CALL_4(message_function, format_function, logger, format, ...) KLY_LOGGER_DETAIL_FORMAT(format_function, logger, format, 2, __VA_ARGS__)
 #define KLY_LOGGER_DETAIL_CALL_5(message_function, format_function, logger, format, ...) KLY_LOGGER_DETAIL_FORMAT(format_function, logger, format, 3, __VA_ARGS__)
@@ -293,8 +298,7 @@ typedef KlyLoggerHandle KlyLogger;
 #define KLY_LOGGER_DETAIL_CALL_18(message_function, format_function, logger, format, ...) KLY_LOGGER_DETAIL_FORMAT(format_function, logger, format, 16, __VA_ARGS__)
 
 #define KLY_LOGGER_DETAIL_DISPATCH_RAW(count, ...) KLY_LOGGER_DETAIL_CAT(KLY_LOGGER_DETAIL_CALL_, count)(__VA_ARGS__)
-#define KLY_LOGGER_DETAIL_DISPATCH(message_function, format_function, ...) \
-	KLY_LOGGER_DETAIL_DISPATCH_RAW(KLY_LOGGER_DETAIL_COUNT(__VA_ARGS__), message_function, format_function, __VA_ARGS__)
+#define KLY_LOGGER_DETAIL_DISPATCH(message_function, format_function, ...) KLY_LOGGER_DETAIL_DISPATCH_RAW(KLY_LOGGER_DETAIL_COUNT(__VA_ARGS__), message_function, format_function, __VA_ARGS__)
 
 #define kly_logger_info(...) KLY_LOGGER_DETAIL_DISPATCH(kly_logger_info, kly_logger_detail_info_args, __VA_ARGS__)
 #define kly_logger_warn(...) KLY_LOGGER_DETAIL_DISPATCH(kly_logger_warn, kly_logger_detail_warn_args, __VA_ARGS__)

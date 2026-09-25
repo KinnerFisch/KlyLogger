@@ -34,7 +34,9 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <mutex>
+#include <queue>
 #include <sys/stat.h>
 #include <thread>
 #include <unordered_map>
@@ -61,10 +63,12 @@ const KlyLogger::LogStyle KlyLogger::WARN_STYLE{ "WARN", "\33[0;33m", "\33[0;93m
 const KlyLogger::LogStyle KlyLogger::ERROR_STYLE{ "ERROR", "\33[0;31m", "\33[0;91m", 4, 12 };
 const KlyLogger::LogStyle KlyLogger::FATAL_STYLE{ "FATAL", "\33[2;31m", "\33[0;31m", 32772, 4 };
 
-// Log task containing logger name, log message, and log style.
+// Log task containing logger name, log message, log style, and callbacks captured at submission.
 struct LogTask {
 	KlyLogger::LogStyle style;
 	std::wstring name, message;
+	std::shared_ptr<const std::function<void()>> beforeLog;
+	std::shared_ptr<const std::function<void(const std::wstring &, const std::wstring &)>> afterLog;
 };
 
 // Retrieve the current local time using the platform-safe conversion routine.
@@ -116,7 +120,7 @@ public:
 
 private:
 	// Pack date components into a compact unsigned integer representation.
-	static unsigned packDate(const std::tm &time) {
+	static constexpr unsigned packDate(const std::tm &time) {
 		return (static_cast<unsigned>(time.tm_year) << 16) + (static_cast<unsigned>(time.tm_mon) << 8) + static_cast<unsigned>(time.tm_mday);
 	}
 
@@ -124,13 +128,13 @@ private:
 	static std::filesystem::path getExecutablePath() {
 #ifdef _WIN32
 		// Get the executable path on Windows.
-		std::wstring path(1024, L'\0');
+		std::wstring path(1024, 0);
 		const DWORD length = GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
 		if (length == 0) return {};
 		path.resize(length);
 #else
 		// Get the executable path on Linux.
-		std::string path(1024, '\0');
+		std::string path(1024, 0);
 		const ssize_t length = readlink("/proc/self/exe", path.data(), path.size() - 1);
 		if (length == -1) return {};
 		path.resize(static_cast<std::size_t>(length));
@@ -358,7 +362,7 @@ private:
 	static HANDLE getHandle() {
 #ifndef KLY_LOGGER_OPTION_NO_CACHE_FOR_OUTPUT_HANDLE
 		// In cache mode, retrieve the stderr handle only once.
-		static const HANDLE handle = GetStdHandle(STD_ERROR_HANDLE); // NOLINT(*-misplaced-const)
+		static const HANDLE handle = GetStdHandle(STD_ERROR_HANDLE);
 		return handle;
 #else
 		// In no-cache mode, retrieve the stderr handle for each output.
@@ -377,54 +381,45 @@ private:
 #endif
 };
 
-// Thread-safe runtime that owns the log queue, callbacks, and background logging thread. A mutex and condition variables replace the old spin lock.
+// Thread-safe runtime that owns the log queue and background logging thread. A mutex and condition variables replace the old spin lock.
 class Runtime {
 public:
+	// Run an operation under the runtime lock and return its result.
+	template<typename Function>
+	auto withLock(const Function &func) const {
+		std::lock_guard lock(mutex_);
+		return func();
+	}
+
 	// Initialize the background thread that processes queued log tasks.
 	Runtime() : worker_([this] { run(); }) {}
 
 	// Wait for queued output, request worker shutdown, and join the thread.
 	~Runtime() {
 		wait();
-		{
-			std::lock_guard lock(mutex_);
-			stopping_ = true;
-		}
+		withLock([this] { stopping_ = true; });
 		workAvailable_.notify_one();
 		worker_.join();
 	}
 
 	// Submit a log output task to the logging thread.
-	void submit(const LogTask &task) {
-		{
-			std::lock_guard lock(mutex_);
-			queue_.push(task);
-		}
+	void submit(const std::wstring &name, std::wstring message, const KlyLogger::LogStyle &style,
+		const std::shared_ptr<const std::function<void()>> &before,
+		const std::shared_ptr<const std::function<void(const std::wstring &, const std::wstring &)>> &after) {
+		withLock([&] { queue_.push({ style, name, std::move(message), before, after }); });
 		workAvailable_.notify_one();
 	}
 
 	// Check whether queued and currently processing tasks are complete.
 	bool finished() const {
-		std::lock_guard lock(mutex_);
-		return queue_.empty() && !processing_;
+		return withLock([this] { return queue_.empty() && !processing_; });
 	}
 
 	// Block the current thread until all log output is completed.
 	void wait() {
+		if (std::this_thread::get_id() == worker_.get_id()) return;
 		std::unique_lock lock(mutex_);
 		finished_.wait(lock, [this] { return queue_.empty() && !processing_; });
-	}
-
-	// Register code to execute before each log message is output.
-	void setBefore(std::function<void()> callback) {
-		std::lock_guard lock(mutex_);
-		beforeLog_ = std::move(callback);
-	}
-
-	// Register code to execute after each log message is output.
-	void setAfter(std::function<void(const std::wstring &, const std::wstring &)> callback) {
-		std::lock_guard lock(mutex_);
-		afterLog_ = std::move(callback);
 	}
 
 private:
@@ -448,12 +443,14 @@ private:
 			}
 
 			processMessage(task);
+			// Release user callbacks outside the runtime lock while the worker still counts as busy.
+			task.beforeLog.reset();
+			task.afterLog.reset();
 
-			{
-				std::lock_guard lock(mutex_);
+			withLock([this] {
 				processing_ = false;
 				if (queue_.empty()) finished_.notify_all();
-			}
+			});
 		}
 	}
 
@@ -462,10 +459,10 @@ private:
 		std::wstring message = task.message;
 		std::size_t newlinePosition;
 		while ((newlinePosition = findNextNewline(message)) != std::wstring::npos) {
-			processSingleLine(task.name, message.substr(0, newlinePosition), task.style);
+			processSingleLine(task, message.substr(0, newlinePosition));
 			message = message.substr(newlinePosition + 1);
 		}
-		if (!message.empty()) processSingleLine(task.name, message, task.style);
+		if (!message.empty()) processSingleLine(task, message);
 	}
 
 	// Find the position of the next CR or LF newline character.
@@ -478,16 +475,10 @@ private:
 	}
 
 	// Process one non-empty log line with callbacks and formatting.
-	void processSingleLine(const std::wstring &name, const std::wstring &message, const KlyLogger::LogStyle &style) {
+	void processSingleLine(const LogTask &task, const std::wstring &message) {
 		if (message.empty()) return;
-		std::function<void()> before;
-		std::function<void(const std::wstring &, const std::wstring &)> after;
-		{
-			std::lock_guard lock(mutex_);
-			before = beforeLog_;
-			after = afterLog_;
-		}
-		if (before) {
+		if (task.beforeLog) {
+			const auto before = *task.beforeLog;
 			try {
 				before();
 			} catch (...) {}
@@ -495,15 +486,16 @@ private:
 #ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
 		console_.updateLogFile();
 #endif
-		printTimestamp(name, style);
-		const std::wstring stripped = console_.processColorCodes(message, style.textColor, style.textAnsiColor, static_cast<bool>(after));
-		if (after) {
+		printTimestamp(task.name, task.style);
+		const std::wstring stripped = console_.processColorCodes(message, task.style.textColor, task.style.textAnsiColor, static_cast<bool>(task.afterLog));
+		console_.clearLine();
+		console_.flushLine();
+		if (task.afterLog) {
+			const auto after = *task.afterLog;
 			try {
 				after(message, stripped);
 			} catch (...) {}
 		}
-		console_.clearLine();
-		console_.flushLine();
 	}
 
 	// Print the current time, level, and optional logger name.
@@ -538,9 +530,6 @@ private:
 	std::condition_variable finished_;
 	// Log task queue processed by the background thread.
 	std::queue<LogTask> queue_;
-	// Code to execute before and after a log message has been output.
-	std::function<void()> beforeLog_;
-	std::function<void(const std::wstring &, const std::wstring &)> afterLog_;
 	// Worker state used by finished() and orderly shutdown.
 	bool processing_{};
 	bool stopping_{};
@@ -557,84 +546,128 @@ static Runtime &runtime() {
 
 // Normalize a logger name by discarding text before its final CR/LF.
 static std::wstring legalizeLoggerName(const std::wstring &loggerName) {
-	const std::size_t lastPosition = std::max(loggerName.find_last_of(L'\r'), loggerName.find_last_of(L'\n'));
+	const std::size_t carriageReturn = loggerName.find_last_of(L'\r');
+	const std::size_t lineFeed = loggerName.find_last_of(L'\n');
+	const std::size_t lastPosition = carriageReturn == std::wstring::npos ? lineFeed
+		: lineFeed == std::wstring::npos ? carriageReturn : std::max(carriageReturn, lineFeed);
 	return lastPosition == std::wstring::npos ? loggerName : loggerName.substr(lastPosition + 1);
 }
 
 std::string KlyLogger::StringConverter::toString(const std::wstring &str) {
+	if (str.empty()) return {};
 	size_t length = 0;
 	// Query the required output length before allocating the narrow string.
 #ifdef _WIN32
 	if (wcstombs_s(&length, nullptr, 0, str.c_str(), 0)) return { str.begin(), str.end() };
-	--length;
 #else
 	length = wcstombs(nullptr, str.c_str(), 0);
 	if (length == static_cast<size_t>(-1)) return { str.begin(), str.end() };
+	++length;
 #endif
 	std::string result(length, 0);
 	// Convert the wide string with the exact required allocation.
 #ifdef _WIN32
-	if (wcstombs_s(&length, result.data(), length, str.c_str(), _TRUNCATE))
+	size_t convertedLength = 0;
+	if (wcstombs_s(&convertedLength, result.data(), result.size(), str.c_str(), _TRUNCATE)) return { str.begin(), str.end() };
+	result.resize(convertedLength ? convertedLength - 1 : 0);
 #else
-	if (wcstombs(result.data(), str.c_str(), length) == static_cast<size_t>(-1))
+	const size_t convertedLength = wcstombs(result.data(), str.c_str(), result.size());
+	if (convertedLength == static_cast<size_t>(-1)) return { str.begin(), str.end() };
+	result.resize(convertedLength);
 #endif
-		return { str.begin(), str.end() };
 	return result;
 }
 
 std::wstring KlyLogger::StringConverter::toWString(const std::string &str) {
+	if (str.empty()) return {};
 	size_t length = 0;
 	// Query the required output length before allocating the wide string.
 #ifdef _WIN32
-	if (mbstowcs_s(&length, nullptr, 0, str.c_str(), 0)) return { str.begin(), str.end() };
-	--length;
+	if (mbstowcs_s(&length, nullptr, 0, str.c_str(), 0)) return win32_toWString(str);
 #else
 	length = mbstowcs(nullptr, str.c_str(), 0);
 	if (length == static_cast<size_t>(-1)) return { str.begin(), str.end() };
+	++length;
 #endif
 	std::wstring result(length, 0);
 	// Convert the wide string with the exact required allocation.
 #ifdef _WIN32
-	if (mbstowcs_s(&length, result.data(), length, str.c_str(), _TRUNCATE))
+	size_t convertedLength = 0;
+	if (mbstowcs_s(&convertedLength, result.data(), result.size(), str.c_str(), _TRUNCATE)) return win32_toWString(str);
+	result.resize(convertedLength ? convertedLength - 1 : 0);
 #else
-	if (mbstowcs(result.data(), str.c_str(), length) == static_cast<size_t>(-1))
+	const size_t convertedLength = mbstowcs(result.data(), str.c_str(), result.size());
+	if (convertedLength == static_cast<size_t>(-1)) return { str.begin(), str.end() };
+	result.resize(convertedLength);
 #endif
-		return { str.begin(), str.end() };
 	return result;
 }
 
-void KlyLogger::StringConverter::clearConverted() {
-	converted = std::queue<std::wstring>();
+#ifdef _WIN32
+std::wstring KlyLogger::StringConverter::win32_toWString(const std::string &str) {
+	if (str.empty()) return {};
+	if (str.size() > static_cast<size_t>((std::numeric_limits<int>::max)())) return { str.begin(), str.end() };
+	const int rawSize = static_cast<int>(str.size());
+	const int length = MultiByteToWideChar(CP_UTF8, 0, str.data(), rawSize, nullptr, 0);
+	if (length == 0) return { str.begin(), str.end() };
+	std::wstring result(static_cast<size_t>(length), 0);
+	const int convertedLength = MultiByteToWideChar(CP_UTF8, 0, str.data(), rawSize, result.data(), length);
+	if (convertedLength == 0) return { str.begin(), str.end() };
+	result.resize(static_cast<size_t>(convertedLength));
+	return result;
 }
+#endif
 
 // Construct a logger with no name.
-KlyLogger::KlyLogger() noexcept : as_wstring(L"KlyLogger{name=<empty>}"), as_string("KlyLogger{name=<empty>}") {}
+KlyLogger::KlyLogger() : as_wstring(L"KlyLogger{name=<empty>}"), as_string("KlyLogger{name=<empty>}") {}
 
 // Construct a logger with a wide string name.
-KlyLogger::KlyLogger(const std::wstring &loggerName) noexcept : name(::legalizeLoggerName(loggerName))
+KlyLogger::KlyLogger(const std::wstring &loggerName) : name(::legalizeLoggerName(loggerName))
 	, as_wstring(L"KlyLogger{name=" + (name.empty() ? L"<empty>" : name) + L'}'), as_string(StringConverter::toString(as_wstring)) {}
 
 // Construct a logger with a narrow string name.
-KlyLogger::KlyLogger(const std::string &loggerName) noexcept : name(::legalizeLoggerName(StringConverter::toWString(loggerName)))
+KlyLogger::KlyLogger(const std::string &loggerName) : name(::legalizeLoggerName(StringConverter::toWString(loggerName)))
 	, as_wstring(L"KlyLogger{name=" + (loggerName.empty() ? L"<empty>" : name) + L'}'), as_string(StringConverter::toString(as_wstring)) {}
+
+KlyLogger::KlyLogger(const KlyLogger &logger) : name(logger.name), as_wstring(logger.as_wstring), as_string(logger.as_string) {
+	std::shared_ptr<const BeforeLogCallback> before;
+	std::shared_ptr<const AfterLogCallback> after;
+	runtime().withLock([&] {
+		before = logger.beforeLog;
+		after = logger.afterLog;
+	});
+	if (before) beforeLog = std::make_shared<const BeforeLogCallback>(*before);
+	if (after) afterLog = std::make_shared<const AfterLogCallback>(*after);
+}
+
+KlyLogger::KlyLogger(KlyLogger &&logger) noexcept : name(std::move(logger.name)), as_wstring(std::move(logger.as_wstring)), as_string(std::move(logger.as_string)) {
+	runtime().withLock([&] {
+		beforeLog = std::move(logger.beforeLog);
+		afterLog = std::move(logger.afterLog);
+	});
+}
 
 const std::string &KlyLogger::string() const noexcept { return as_string; }
 const std::wstring &KlyLogger::wstring() const noexcept { return as_wstring; }
 
 // Push a formatted log task to the background queue.
-void KlyLogger::submitLog(const std::wstring &loggerName, std::wstring message, const LogStyle &style) {
-	runtime().submit({ style, loggerName, std::move(message) });
+void KlyLogger::submitLog(std::wstring message, const LogStyle &style) const {
+	runtime().submit(name, std::move(message), style, beforeLog, afterLog);
 }
 
-bool KlyLogger::finishedTasks() noexcept { return runtime().finished(); }
-void KlyLogger::wait() noexcept { runtime().wait(); }
+bool KlyLogger::finishedTasks() { return runtime().finished(); }
+void KlyLogger::wait() { runtime().wait(); }
 
-void KlyLogger::setAfterLog(const std::function<void(const std::wstring &, const std::wstring &)> &func) noexcept {
-	runtime().setAfter(func);
+void KlyLogger::setAfterLog(const std::function<void(const std::wstring &, const std::wstring &)> &func) const {
+	std::shared_ptr<const AfterLogCallback> callback;
+	if (func) callback = std::make_shared<const AfterLogCallback>(func);
+	runtime().withLock([&] { afterLog.swap(callback); });
 }
 
-void KlyLogger::setBeforeLog(const std::function<void()> &func) noexcept {
-	runtime().setBefore(func);
+void KlyLogger::setBeforeLog(const std::function<void()> &func) const {
+	std::shared_ptr<const BeforeLogCallback> callback;
+	if (func) callback = std::make_shared<const BeforeLogCallback>(func);
+	runtime().withLock([&] { beforeLog.swap(callback); });
 }
 
 // Convert the tagged C argument array into fmt's runtime argument store, then format the complete string in one pass.
@@ -737,6 +770,10 @@ KlyLoggerHandle kly_logger_create_named_narrow(const char *name) {
 	}
 }
 
+void kly_logger_destroy(const KlyLoggerHandle logger) {
+	delete logger;
+}
+
 const char *kly_logger_string(const KlyLoggerHandle logger) {
 	return logger ? logger->logger.string().c_str() : nullptr;
 }
@@ -812,20 +849,22 @@ void kly_logger_detail_fatal_narrow_args(const KlyLoggerHandle logger, const cha
 bool kly_logger_finished_tasks() { return KlyLogger::finishedTasks(); }
 void kly_logger_wait() { KlyLogger::wait(); }
 
-void kly_logger_set_before_log(KlyLoggerBeforeLogCallback callback) {
+void kly_logger_set_before_log(const KlyLoggerHandle logger, KlyLoggerBeforeLogCallback callback) {
+	if (!logger) return;
 	if (!callback) {
-		KlyLogger::setBeforeLog({});
+		logger->logger.setBeforeLog({});
 		return;
 	}
-	KlyLogger::setBeforeLog(callback);
+	logger->logger.setBeforeLog(callback);
 }
 
-void kly_logger_set_after_log(KlyLoggerAfterLogCallback callback) {
+void kly_logger_set_after_log(const KlyLoggerHandle logger, KlyLoggerAfterLogCallback callback) {
+	if (!logger) return;
 	if (!callback) {
-		KlyLogger::setAfterLog({});
+		logger->logger.setAfterLog({});
 		return;
 	}
-	KlyLogger::setAfterLog([callback](const std::wstring &original, const std::wstring &plain) {
+	logger->logger.setAfterLog([callback](const std::wstring &original, const std::wstring &plain) {
 		callback(original.c_str(), plain.c_str());
 	});
 }
