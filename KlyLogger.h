@@ -180,7 +180,6 @@ KLY_LOGGER_DETAIL_INLINE KlyLoggerFormatArg kly_logger_arg_identity(const KlyLog
 	KlyLoggerFormatArg: kly_logger_arg_identity, \
 	_Bool: kly_logger_arg_bool, \
 	char: kly_logger_arg_char, \
-	signed char: kly_logger_arg_signed, \
 	unsigned char: kly_logger_arg_unsigned, \
 	short: kly_logger_arg_signed, \
 	unsigned short: kly_logger_arg_unsigned, \

@@ -221,7 +221,7 @@ public:
 #endif
 		}
 #ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
-		fileLogger_.write(message);
+		fileLogger_.write(message[0] == '\r' ? message.substr(1) : message);
 #endif
 	}
 
