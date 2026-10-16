@@ -1,4 +1,6 @@
 /*
+ * Copyright (c) 2024-2026 KinnerFisch
+ *
  * Boost Software License - Version 1.0 - August 17th, 2003
  *
  * Permission is hereby granted, free of charge, to any person or organization
@@ -27,19 +29,10 @@
 #include "KlyLogger.hpp"
 #include "KlyLogger.h"
 
-#include <algorithm>
 #include <condition_variable>
-#include <cstdio>
-#include <ctime>
 #include <filesystem>
-#include <fstream>
 #include <iostream>
-#include <limits>
-#include <mutex>
 #include <queue>
-#include <sys/stat.h>
-#include <thread>
-#include <unordered_map>
 
 #include <fmt/args.h>
 
@@ -48,703 +41,799 @@
 #define NOMINMAX
 #endif
 #include <Windows.h>
-#include <io.h>
-#define KLY_ISATTY _isatty
-#define KLY_FILENO _fileno
+#define isatty _isatty
+#define fileno _fileno
 #else
 #include <unistd.h>
-#define KLY_ISATTY isatty
-#define KLY_FILENO fileno
 #endif
 
 // Visual and textual attributes for each log level, including Windows console colors and ANSI escape sequences.
+const KlyLogger::LogStyle KlyLogger::DEBUG_STYLE{ "DEBUG", "\33[0;37m", "\33[0;2m", 7, 8 };
 const KlyLogger::LogStyle KlyLogger::INFO_STYLE{ "INFO", "\33[0;92m", "\33[0;37m", 10, 7 };
 const KlyLogger::LogStyle KlyLogger::WARN_STYLE{ "WARN", "\33[0;33m", "\33[0;93m", 6, 14 };
 const KlyLogger::LogStyle KlyLogger::ERROR_STYLE{ "ERROR", "\33[0;31m", "\33[0;91m", 4, 12 };
 const KlyLogger::LogStyle KlyLogger::FATAL_STYLE{ "FATAL", "\33[2;31m", "\33[0;31m", 32772, 4 };
 
-// Log task containing logger name, log message, log style, and callbacks captured at submission.
-struct LogTask {
-	KlyLogger::LogStyle style;
-	std::wstring name, message;
-	std::shared_ptr<const std::function<void()>> beforeLog;
-	std::shared_ptr<const std::function<void(const std::wstring &, const std::wstring &)>> afterLog;
-};
+namespace {
+	// Log task containing logger name, log message, log style, and callbacks captured at submission.
+	struct LogTask {
+		std::shared_ptr<const std::wstring> name;
+		std::wstring message;
+		const KlyLogger::LogStyle *style{};
+		std::shared_ptr<const std::function<void()>> before_log_callback;
+		std::shared_ptr<const std::function<void(const std::wstring &, const std::wstring &)>> after_log_callback;
+	};
 
-// Retrieve the current local time using the platform-safe conversion routine.
-static std::tm getLocalTime() {
-	const std::time_t now = std::time(nullptr);
-	std::tm result{};
+	// Retrieve the local time using the platform-safe conversion routine.
+	std::tm get_local_time(const std::time_t &time) {
+		std::tm result{};
 #ifdef _WIN32
-	localtime_s(&result, &now);
+		localtime_s(&result, &time);
 #else
-	localtime_r(&now, &result);
+		localtime_r(&time, &result);
 #endif
-	return result;
-}
+		return result;
+	}
 
-// Format a time structure as an HH:MM:SS string.
-static std::wstring formatTime(const std::tm &time) {
-	return fmt::format(L"{:02}:{:02}:{:02} ", time.tm_hour, time.tm_min, time.tm_sec);
-}
+	// Format a time structure as an HH:MM:SS string with a trailing separating space.
+	std::wstring format_time(const std::tm &time) { return fmt::format(L"{:02}:{:02}:{:02} ", time.tm_hour, time.tm_min, time.tm_sec); }
+
+	// Append one Unicode code point to a wide string, splitting it into a surrogate pair when wchar_t is 16 bits.
+	void append_wide(std::wstring &out, int code_point) {
+		if constexpr (sizeof(wchar_t) == 2) {
+			if (code_point > 0xFFFF) {
+				code_point -= 0x10000;
+				out.push_back(static_cast<wchar_t>(0xD800 + (code_point >> 10)));
+				out.push_back(static_cast<wchar_t>(0xDC00 + (code_point & 0x3FF)));
+				return;
+			}
+		}
+		out.push_back(static_cast<wchar_t>(code_point));
+	}
 
 #ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
-// File logging helper.
-class FileLogger {
-public:
-	// Initialize the file logging system if this library variant enables it.
-	void initialize() { logFile_ = getLogFileHandle(); }
+	// File logging helper.
+	class FileLogger {
+		// Date on which the active log file was created.
+		inline static unsigned s_log_file_create_date{};
+		// Second of the last date check, so the expensive local-time lookup runs at most once per second.
+		inline static std::time_t s_last_date_check{};
+		// Active log file handle, log directory, and latest.log path.
+		inline static std::ofstream s_log_file;
+		inline static std::filesystem::path s_logs_directory;
+		inline static std::filesystem::path s_latest_log;
 
-	// Update the log file handle when the local date changes.
-	void updateIfNeeded() {
-		if (packDate(getLocalTime()) != logFileCreateDate_) {
-			if (logFile_.is_open()) logFile_.close();
-			initialize();
+	public:
+		// Pack date components into a compact unsigned integer representation.
+		static constexpr unsigned pack_date(const std::tm &time) {
+			return (static_cast<unsigned>(time.tm_year) << 16) + (static_cast<unsigned>(time.tm_mon) << 8) + static_cast<unsigned>(time.tm_mday);
 		}
-	}
 
-	// Output a narrow string to the log file.
-	void write(const std::string &message) {
-		if (logFile_.is_open()) logFile_ << message;
-	}
-
-	// Convert and output a wide string to the log file.
-	void write(const std::wstring &message) {
-		if (logFile_.is_open()) logFile_ << KlyLogger::StringConverter::toString(message);
-	}
-
-	// Flush the completed line to the log file.
-	void newline() {
-		if (logFile_.is_open()) logFile_ << std::endl;
-	}
-
-private:
-	// Pack date components into a compact unsigned integer representation.
-	static constexpr unsigned packDate(const std::tm &time) {
-		return (static_cast<unsigned>(time.tm_year) << 16) + (static_cast<unsigned>(time.tm_mon) << 8) + static_cast<unsigned>(time.tm_mday);
-	}
-
-	// Get the absolute path of the current executable.
-	static std::filesystem::path getExecutablePath() {
+		// Get the absolute path of the current executable.
+		static std::filesystem::path get_executable_path() {
 #ifdef _WIN32
-		// Get the executable path on Windows.
-		std::wstring path(1024, 0);
-		const DWORD length = GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
-		if (length == 0) return {};
-		path.resize(length);
+			// Get the executable path on Windows.
+			std::wstring path(1024, 0);
+			const DWORD length = GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
+			if (length == 0) return {};
+			path.resize(length);
 #else
-		// Get the executable path on Linux.
-		std::string path(1024, 0);
-		const ssize_t length = readlink("/proc/self/exe", path.data(), path.size() - 1);
-		if (length == -1) return {};
-		path.resize(static_cast<std::size_t>(length));
+			// Get the executable path on Linux.
+			std::string path(1024, 0);
+			const ssize_t length = readlink("/proc/self/exe", path.data(), path.size() - 1);
+			if (length == -1) return {};
+			path.resize(static_cast<size_t>(length));
 #endif
-		return path;
-	}
+			return path;
+		}
 
-	// Retrieve the current log file handle, creating directories and rotating logs if needed.
-	std::ofstream getLogFileHandle() {
-		try {
-			// Initialize the logs directory and latest log path if empty.
-			if (logsDirectory_.empty() || latestLog_.empty()) {
-				logsDirectory_ = getExecutablePath().parent_path() / "logs";
-				latestLog_ = logsDirectory_ / "latest.log";
+		// Rename latest.log to a dated backup using YYYY-MM-DD-N.log.
+		static void rotate_log_files(const std::tm &time) {
+			if (!std::filesystem::exists(s_latest_log)) return;
+
+			// Use the file's last write time when available, falling back to the supplied time.
+			std::tm file_time = time;
+			std::error_code error;
+			const std::filesystem::file_time_type written = std::filesystem::last_write_time(s_latest_log, error);
+			if (!error) {
+				// file_time_type uses an unspecified clock, so rebase it onto system_clock before converting.
+				const std::chrono::system_clock::time_point system_time =
+					std::chrono::time_point_cast<std::chrono::system_clock::duration>(written - std::filesystem::file_time_type::clock::now() + std::chrono::system_clock::now());
+				file_time = get_local_time(std::chrono::system_clock::to_time_t(system_time));
 			}
 
-			// Ensure the log directory exists.
-			std::filesystem::create_directories(logsDirectory_);
-			const std::tm time = getLocalTime();
-			// Rename the existing latest.log before opening a new one.
-			rotateLogFiles(time);
-			logFileCreateDate_ = packDate(time);
-			return std::ofstream(latestLog_, std::ios::out | std::ios::trunc | std::ios::binary);
-		} catch (...) {
-			// Disable file output if directory creation, rotation, or opening fails.
-			return {};
+			// Find the first available filename by incrementing its numeric suffix.
+			unsigned index = 0;
+			std::filesystem::path rotated;
+			do {
+				rotated = s_logs_directory / fmt::format(L"{:04}-{:02}-{:02}-{}.log", file_time.tm_year + 1900, file_time.tm_mon + 1, file_time.tm_mday, ++index);
+			} while (std::filesystem::exists(rotated));
+			std::filesystem::rename(s_latest_log, rotated);
 		}
-	}
 
-	// Rename latest.log to a dated backup using YYYY-MM-DD-N.log.
-	void rotateLogFiles(const std::tm &time) {
-		if (!std::filesystem::exists(latestLog_)) return;
+		// Retrieve the current log file handle, creating directories and rotating logs if needed.
+		static std::ofstream get_log_file() {
+			try {
+				// Initialize the logs directory and latest log path if empty.
+				if (s_logs_directory.empty() || s_latest_log.empty()) {
+					s_logs_directory = get_executable_path().parent_path() / "logs";
+					s_latest_log = s_logs_directory / "latest.log";
+				}
 
-		std::tm fileTime{};
-		struct stat fileStat {};
-		if (stat(latestLog_.string().c_str(), &fileStat)) fileTime = time;
-		else {
+				// Ensure the log directory exists.
+				std::filesystem::create_directories(s_logs_directory);
+				const std::tm time = get_local_time(std::time(nullptr));
+				// Rename the existing latest.log before opening a new one.
+				rotate_log_files(time);
+				s_log_file_create_date = pack_date(time);
+				return std::ofstream(s_latest_log, std::ios::out | std::ios::trunc | std::ios::binary);
+			} catch (...) {
+				// Disable file output if directory creation, rotation, or opening fails.
+				return {};
+			}
+		}
+
+		// Initialize the file logging system if this library variant enables it.
+		static void initialize() { s_log_file = get_log_file(); }
+
+		// Update the log file handle when the local date changes.
+		static void update_if_needed() {
+			const std::time_t now = std::time(nullptr);
+			if (now == s_last_date_check) return;
+			s_last_date_check = now;
+			if (pack_date(get_local_time(now)) != s_log_file_create_date) {
+				if (s_log_file.is_open()) s_log_file.close();
+				initialize();
+			}
+		}
+
+		// Output a narrow string to the log file.
+		static void write(const std::string &message) { if (s_log_file.is_open()) s_log_file << message; }
+
+		// Flush the completed line to the log file.
+		static void newline() { if (s_log_file.is_open()) s_log_file << std::endl; }
+	};
+#endif
+
+	// Platform-specific console handling.
+	class Console {
+	public:
+		// Detect terminal output and initialize ANSI escape-sequence support.
+		Console() : m_is_atty(isatty(fileno(stderr)) != 0), m_ansi_supported(initialize_ansi()) { m_line_buffer.reserve(256); }
+
+		// Set the text color for current console output.
+		void set_color(const uint16_t color_win, const std::string_view color) {
+			if (!m_is_atty) return;
+			if (m_ansi_supported) m_line_buffer.append(color.begin(), color.end());
 #ifdef _WIN32
-			localtime_s(&fileTime, &fileStat.st_mtime);
+			else SetConsoleTextAttribute(get_handle(), color_win);
+#endif
+		}
+
+		// Output a narrow string to the console and log file.
+		void write(const std::string_view message) {
+			if (m_is_atty) {
+				if (m_ansi_supported) m_line_buffer.append(message.begin(), message.end());
+#ifdef _WIN32
+				else WriteConsoleA(get_handle(), message.data(), static_cast<DWORD>(message.length()), nullptr, nullptr);
+#endif
+			}
+#ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
+			append_file(message);
+#endif
+		}
+
+		// Output a wide string to the console and log file.
+		void write(const std::wstring_view message) {
+			if (m_is_atty) {
+				if (m_ansi_supported) m_line_buffer.append(message);
+#ifdef _WIN32
+				else WriteConsoleW(get_handle(), message.data(), static_cast<DWORD>(message.length()), nullptr, nullptr);
+#endif
+			}
+#ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
+			append_file(message);
+#endif
+		}
+
+		// Flush buffered line content to the console and log file.
+		void flush_line() {
+#ifdef _WIN32
+			if (m_is_atty) {
+				if (m_ansi_supported) {
+					m_line_buffer.push_back(L'\n');
+					WriteConsoleW(get_handle(), m_line_buffer.c_str(), static_cast<DWORD>(m_line_buffer.length()), nullptr, nullptr);
+				} else WriteConsoleA(get_handle(), "\n", 1, nullptr, nullptr);
+			}
 #else
-			localtime_r(&fileStat.st_mtime, &fileTime);
+			if (m_is_atty) std::cerr << KlyLogger::StringConverter::to_string(m_line_buffer) << std::endl;
 #endif
-		}
-
-		// Find the first available filename by incrementing its numeric suffix.
-		unsigned index = 1;
-		std::filesystem::path rotated;
-		do {
-			rotated = logsDirectory_ / fmt::format(L"{:04}-{:02}-{:02}-{}.log", fileTime.tm_year + 1900, fileTime.tm_mon + 1, fileTime.tm_mday, index++);
-		} while (std::filesystem::exists(rotated));
-		std::filesystem::rename(latestLog_, rotated);
-	}
-
-	// Date on which the active log file was created.
-	unsigned logFileCreateDate_{};
-	// Active log file handle, log directory, and latest.log path.
-	std::ofstream logFile_;
-	std::filesystem::path logsDirectory_;
-	std::filesystem::path latestLog_;
-};
-#endif
-
-// Platform-specific console handling.
-class Console {
-public:
-	// Detect terminal output and initialize ANSI escape-sequence support.
-	Console() : isAtty_(KLY_ISATTY(KLY_FILENO(stderr)) != 0), ansiSupported_(initializeAnsi()) {}
-
-	// Set the text color for current console output.
-	void setColor(const uint16_t color, const std::string &ansi) {
-		if (!isAtty_) return;
-		if (ansiSupported_) lineBuffer_ += std::wstring(ansi.begin(), ansi.end());
-#ifdef _WIN32
-		else SetConsoleTextAttribute(getHandle(), color);
-#endif
-	}
-
-	// Output a narrow string to the console and log file.
-	void write(const std::string &message) {
-		if (isAtty_) {
-			if (ansiSupported_) lineBuffer_ += std::wstring(message.begin(), message.end());
-#ifdef _WIN32
-			else WriteConsoleA(getHandle(), message.c_str(), static_cast<DWORD>(message.length()), nullptr, nullptr);
-#endif
-		}
 #ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
-		fileLogger_.write(message[0] == '\r' ? message.substr(1) : message);
+			if (!m_file_line_buffer.empty()) FileLogger::write(m_file_line_buffer);
+			FileLogger::newline();
+			m_file_line_buffer.clear();
 #endif
-	}
+			m_line_buffer.clear();
+		}
 
-	// Output a wide string to the console and log file.
-	void write(const std::wstring &message) {
-		if (isAtty_) {
-			if (ansiSupported_) lineBuffer_ += message;
+		// Clear remaining content in the current console line.
+		void clear_line() {
+			if (!m_is_atty) return;
+			if (m_ansi_supported) m_line_buffer += L"\33[m\33[K";
 #ifdef _WIN32
-			else WriteConsoleW(getHandle(), message.c_str(), static_cast<DWORD>(message.length()), nullptr, nullptr);
+			else {
+				// On Windows without ANSI, fill the rest of the line with spaces and reset its text attributes.
+				SetConsoleTextAttribute(get_handle(), 7);
+				CONSOLE_SCREEN_BUFFER_INFO info{};
+				if (GetConsoleScreenBufferInfo(get_handle(), &info)) {
+					auto length = static_cast<DWORD>(info.dwSize.X - info.dwCursorPosition.X);
+					FillConsoleOutputCharacterA(get_handle(), ' ', length, info.dwCursorPosition, &length);
+					FillConsoleOutputAttribute(get_handle(), info.wAttributes, length, info.dwCursorPosition, &length);
+				}
+			}
 #endif
 		}
+
+		// Process Minecraft color codes in message text and optionally return a plain-text copy with those formatting codes removed.
+		std::wstring process_color_codes(const std::wstring_view message, const uint16_t color_win, const std::string_view color, const bool should_strip_message) {
+			// Trailing section signs are incomplete color codes and are dropped, matching the original behaviour;
+			// the scanned range is shrunk instead of copying the string per code.
+			size_t size = message.size();
+			while (size > 0 && message[size - 1] == L'\247') --size;
+
+			std::wstring stripped;
+			if (should_strip_message) stripped.reserve(size);
+
+			size_t start = 0;
+			while (start < size) {
+				const size_t position = message.find(L'\247', start);
+				if (position == std::wstring_view::npos || position >= size) {
+					write(message.substr(start, size - start));
+					if (should_strip_message) stripped.append(message.data() + start, size - start);
+					break;
+				}
+				if (position > start) {
+					write(message.substr(start, position - start));
+					if (should_strip_message) stripped.append(message.data() + start, position - start);
+				}
+				if (m_is_atty && position + 1 < size) apply_minecraft_color_code(message[position + 1], color_win, color);
+				start = position + 2;
+			}
+			return stripped;
+		}
+
+		// Report whether standard error is connected to a terminal.
+		[[nodiscard]] bool is_atty() const { return m_is_atty; }
+
+		// Formatted HH:MM:SS timestamp, rebuilt only when the current second changes.
+		const std::wstring &timestamp() {
+			if (const std::time_t now = std::time(nullptr); now != m_last_time) {
+				m_last_time = now;
+				m_last_timestamp = format_time(get_local_time(now));
+			}
+			return m_last_timestamp;
+		}
+
+	private:
 #ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
-		fileLogger_.write(message);
-#endif
-	}
-
-	// Flush buffered line content to the console and log file.
-	void flushLine() {
-#ifdef _WIN32
-		if (isAtty_) {
-			if (ansiSupported_) {
-				lineBuffer_.push_back(L'\n');
-				WriteConsoleW(getHandle(), lineBuffer_.c_str(), static_cast<DWORD>(lineBuffer_.length()), nullptr, nullptr);
-			} else WriteConsoleA(getHandle(), "\n", 1, nullptr, nullptr);
+		// Accumulate the plain, color-free line so the file backend converts and writes it once per line instead of once per colored segment. Narrow bytes are kept verbatim.
+		void append_file(const std::string_view message) {
+			if (m_file_line_buffer.empty() && message.starts_with('\r')) m_file_line_buffer.append(message.substr(1));
+			else m_file_line_buffer.append(message);
 		}
+
+		void append_file(const std::wstring_view message) { m_file_line_buffer += KlyLogger::StringConverter::to_string(message); }
+#endif
+
+		// Initialize the console and check whether ANSI escape sequences are supported. If output is not a terminal, ANSI output stays disabled.
+		[[nodiscard]] bool initialize_ansi() const {
+			if (!m_is_atty) return false;
+#ifdef _WIN32
+			// Enable virtual terminal processing so the console recognizes ANSI escape sequences.
+			// If console mode cannot be read or changed, assume ANSI is unsupported and use the legacy color API.
+			DWORD mode = 0;
+			return GetConsoleMode(get_handle(), &mode) && SetConsoleMode(get_handle(), mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
 #else
-		if (isAtty_) std::cerr << KlyLogger::StringConverter::toString(lineBuffer_) << std::endl;
+			return true;
 #endif
-#ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
-		fileLogger_.newline();
-#endif
-		lineBuffer_.clear();
-	}
+		}
 
-	// Clear remaining content in the current console line.
-	void clearLine() {
-		if (!isAtty_) return;
-		if (ansiSupported_) lineBuffer_ += L"\33[m\33[K";
+		// Get the text attributes of the current console text.
+		static uint16_t get_text_attribute() {
 #ifdef _WIN32
-		else {
-			// On Windows without ANSI, fill the rest of the line with spaces and reset its text attributes.
-			SetConsoleTextAttribute(getHandle(), 7);
 			CONSOLE_SCREEN_BUFFER_INFO info{};
-			if (GetConsoleScreenBufferInfo(getHandle(), &info)) {
-				auto length = static_cast<DWORD>(info.dwSize.X - info.dwCursorPosition.X);
-				FillConsoleOutputCharacterA(getHandle(), ' ', length, info.dwCursorPosition, &length);
-				FillConsoleOutputAttribute(getHandle(), info.wAttributes, length, info.dwCursorPosition, &length);
+			return GetConsoleScreenBufferInfo(get_handle(), &info) ? info.wAttributes : 7;
+#else
+			return 0;
+#endif
+		}
+
+		// Set console text color and style from a Minecraft-style color code.
+		void apply_minecraft_color_code(const wchar_t code, const uint16_t initial_color, const std::string_view ansi_color) {
+			// Lookup table converting Minecraft colors to ANSI sequences.
+			static constexpr const char *k_colors[]{
+				"\33[30m", "\33[0;34m", "\33[0;32m", "\33[0;36m", "\33[0;31m", "\33[0;35m", "\33[0;33m", "\33[0;37m",
+				"\33[0;90m", "\33[0;94m", "\33[0;92m", "\33[0;96m", "\33[0;91m", "\33[0;95m", "\33[0;93m", "\33[0;97m"
+			};
+
+			// Numeric and alphabetic color codes only change the text color.
+			if (L'0' <= code && code <= L'9') {
+				set_color(static_cast<uint16_t>(code - L'0'), k_colors[code - L'0']);
+				return;
+			}
+			if (L'a' <= code && code <= L'f') {
+				set_color(static_cast<uint16_t>(code - L'a' + 10), k_colors[code - L'a' + 10]);
+				return;
+			}
+
+			// Formatting codes reuse the active text attributes, which only the legacy Windows console path consumes; the ANSI path ignores them entirely.
+			const uint16_t attribute = m_ansi_supported ? 0 : get_text_attribute();
+			switch (code) {
+				case L'k':
+					set_color(static_cast<uint16_t>(attribute | 0x4000), "\33[6m");
+					break;
+				case L'l':
+					set_color(attribute, "\33[1m");
+					break;
+				case L'm':
+					set_color(attribute, "\33[9m");
+					break;
+				case L'n':
+					set_color(static_cast<uint16_t>(attribute | 0x8000), "\33[4m");
+					break;
+				case L'o':
+					set_color(attribute, "\33[3m");
+					break;
+				case L'r':
+					set_color(initial_color, ansi_color);
+					break;
+				default:
+					break;
 			}
 		}
-#endif
-	}
-
-	// Process Minecraft color codes in message text and optionally return a plain-text copy with those formatting codes removed.
-	std::wstring processColorCodes(std::wstring message, const uint16_t initialColor, const std::string &ansiColor, const bool stripMessage) {
-		std::wstring stripped;
-		while (!message.empty() && message.back() == L'\247') message.pop_back();
-
-		std::size_t position;
-		while ((position = message.find(L'\247')) != std::wstring::npos) {
-			const std::wstring part = message.substr(0, position);
-			write(part);
-			if (stripMessage) stripped += part;
-			if (isAtty_ && position + 1 < message.length()) applyMinecraftColorCode(message[position + 1], initialColor, ansiColor);
-			message = message.substr(position + 2);
-		}
-
-		if (!message.empty()) {
-			write(message);
-			if (stripMessage) stripped += message;
-		}
-		return stripped;
-	}
-
-
-#ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
-	// Forward file lifecycle operations to the file logging helper.
-	void updateLogFile() { fileLogger_.updateIfNeeded(); }
-	void initializeLogFile() { fileLogger_.initialize(); }
-#endif
-
-	[[nodiscard]] bool isAtty() const { return isAtty_; }
-
-private:
-	// Initialize the console and check whether ANSI escape sequences are supported. If output is not a terminal, ANSI output stays disabled.
-	[[nodiscard]] bool initializeAnsi() const {
-		if (!isAtty_) return false;
-#ifdef _WIN32
-		// Enable virtual terminal processing so the console recognizes ANSI escape sequences.
-		// If console mode cannot be read or changed, assume ANSI is unsupported and use the legacy color API.
-		DWORD mode = 0;
-		return GetConsoleMode(getHandle(), &mode) && SetConsoleMode(getHandle(), mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
-#else
-		return true;
-#endif
-	}
-
-	// Get the text attributes of the current console text.
-	static uint16_t getTextAttribute() {
-#ifdef _WIN32
-		CONSOLE_SCREEN_BUFFER_INFO info{};
-		return GetConsoleScreenBufferInfo(getHandle(), &info) ? info.wAttributes : 7;
-#else
-		return 0;
-#endif
-	}
-
-	// Set console text color and style from a Minecraft-style color code.
-	void applyMinecraftColorCode(const wchar_t code, uint16_t initialColor, const std::string &ansiColor) {
-		// Lookup table converting Minecraft colors to ANSI sequences.
-		static constexpr const char *colors[]{
-			"\33[30m", "\33[0;34m", "\33[0;32m", "\33[0;36m", "\33[0;31m", "\33[0;35m", "\33[0;33m", "\33[0;37m",
-			"\33[0;90m", "\33[0;94m", "\33[0;92m", "\33[0;96m", "\33[0;91m", "\33[0;95m", "\33[0;93m", "\33[0;97m"};
-
-		// Numeric and alphabetic color codes only change the text color.
-		if (L'0' <= code && code <= L'9') {
-			setColor(static_cast<uint16_t>(code - L'0'), colors[code - L'0']);
-			return;
-		}
-		if (L'a' <= code && code <= L'f') {
-			setColor(static_cast<uint16_t>(code - L'W'), colors[code - L'W']);
-			return;
-		}
-
-		// Formatting codes use mappings based on the active text attributes, reset restores the level's initial color.
-		const uint16_t attribute = getTextAttribute();
-		std::unordered_map<wchar_t, std::pair<uint16_t, std::string>> mappings{
-			{ L'k', { static_cast<uint16_t>(attribute | 0x4000), "\33[5m" } },
-			{ L'l', { attribute, "\33[21m" } },
-			{ L'm', { attribute, "\33[9m" } },
-			{ L'n', { static_cast<uint16_t>(attribute | 0x8000), "\33[4m" } },
-			{ L'o', { attribute, "\33[3m" } },
-			{ L'r', { initialColor, ansiColor } } };
-		if (const auto found = mappings.find(code); found != mappings.end()) setColor(found->second.first, found->second.second);
-	}
 
 #ifdef _WIN32
-	// Get the Windows stderr handle with optional caching.
-	static HANDLE getHandle() {
+		// Get the Windows stderr handle with optional caching.
+		static HANDLE get_handle() {
 #ifndef KLY_LOGGER_OPTION_NO_CACHE_FOR_OUTPUT_HANDLE
-		// In cache mode, retrieve the stderr handle only once.
-		static const HANDLE handle = GetStdHandle(STD_ERROR_HANDLE);
-		return handle;
+			// In cache mode, retrieve the stderr handle only once.
+			static const HANDLE handle = GetStdHandle(STD_ERROR_HANDLE);
+			return handle;
 #else
-		// In no-cache mode, retrieve the stderr handle for each output.
-		return GetStdHandle(STD_ERROR_HANDLE);
+			// In no-cache mode, retrieve the stderr handle for each output.
+			return GetStdHandle(STD_ERROR_HANDLE);
 #endif
-	}
+		}
 #endif
 
-	// Terminal and ANSI capability flags.
-	bool isAtty_;
-	bool ansiSupported_;
-	// Cache complete ANSI lines to reduce console output frequency.
-	std::wstring lineBuffer_;
+		// Terminal and ANSI capability flags.
+		bool m_is_atty;
+		bool m_ansi_supported;
+		// Cache complete ANSI lines to reduce console output frequency.
+		std::wstring m_line_buffer;
+		// Cached HH:MM:SS timestamp, rebuilt at most once per second.
+		std::time_t m_last_time{};
+		std::wstring m_last_timestamp;
 #ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
-	FileLogger fileLogger_;
+		// Plain, color-free text accumulated for the current line and written to the file once per line.
+		std::string m_file_line_buffer;
 #endif
-};
+	};
 
-// Thread-safe runtime that owns the log queue and background logging thread. A mutex and condition variables replace the old spin lock.
-class Runtime {
-public:
-	// Run an operation under the runtime lock and return its result.
-	template<typename Function>
-	auto withLock(const Function &func) const {
-		std::lock_guard lock(mutex_);
-		return func();
-	}
+	// Thread-safe runtime that owns the log queue and background logging thread. A mutex and condition variables replace the old spin lock.
+	class Runtime {
+	public:
+		// Run an operation under the runtime lock and return its result.
+		template<typename Function>
+		auto call_with_lock(const Function &func) const {
+			std::lock_guard lock(m_mutex);
+			return func();
+		}
 
-	// Initialize the background thread that processes queued log tasks.
-	Runtime() : worker_([this] { run(); }) {}
+		// Initialize the background thread that processes queued log tasks.
+		Runtime() : m_worker([this] { run(); }) {}
 
-	// Wait for queued output, request worker shutdown, and join the thread.
-	~Runtime() {
-		wait();
-		withLock([this] { stopping_ = true; });
-		workAvailable_.notify_one();
-		worker_.join();
-	}
+		// Wait for queued output, request worker shutdown, and join the thread.
+		~Runtime() {
+			wait();
+			call_with_lock([this] { m_stopping = true; });
+			m_work_available.notify_one();
+			m_worker.join();
+		}
 
-	// Submit a log output task to the logging thread.
-	void submit(const std::wstring &name, std::wstring message, const KlyLogger::LogStyle &style,
-		const std::shared_ptr<const std::function<void()>> &before,
-		const std::shared_ptr<const std::function<void(const std::wstring &, const std::wstring &)>> &after) {
-		withLock([&] { queue_.push({ style, name, std::move(message), before, after }); });
-		workAvailable_.notify_one();
-	}
+		// Submit a log output task to the logging thread.
+		void submit(std::shared_ptr<const std::wstring> name, std::wstring message, const KlyLogger::LogStyle *style, const std::shared_ptr<const std::function<void()>> &before,
+					const std::shared_ptr<const std::function<void(const std::wstring &, const std::wstring &)>> &after) {
+			// Move the name and message, and copy the callback owners, before taking the lock so the critical section only performs the queue insertion.
+			LogTask task{ std::move(name), std::move(message), style, before, after };
+			call_with_lock([&] { m_queue.push(std::move(task)); });
+			m_work_available.notify_one();
+		}
 
-	// Check whether queued and currently processing tasks are complete.
-	bool finished() const {
-		return withLock([this] { return queue_.empty() && !processing_; });
-	}
+		// Check whether queued and currently processing tasks are complete.
+		bool finished() const { return call_with_lock([this] { return m_queue.empty() && !m_processing; }); }
 
-	// Block the current thread until all log output is completed.
-	void wait() {
-		if (std::this_thread::get_id() == worker_.get_id()) return;
-		std::unique_lock lock(mutex_);
-		finished_.wait(lock, [this] { return queue_.empty() && !processing_; });
-	}
+		// Block the current thread until all log output is completed.
+		void wait() {
+			if (std::this_thread::get_id() == m_worker.get_id()) return;
+			std::unique_lock lock(m_mutex);
+			m_finished.wait(lock, [this] { return m_queue.empty() && !m_processing; });
+		}
 
-private:
-	// Process log tasks until runtime shutdown.
-	void run() {
+	private:
+		// Process log tasks until runtime shutdown.
+		void run() {
 #ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
-		console_.initializeLogFile();
+			FileLogger::initialize();
 #endif
 
-		// Keep the worker alive until process shutdown, sleeping while the queue is empty instead of busy-waiting.
-		while (true) {
-			LogTask task;
-			{
-				std::unique_lock lock(mutex_);
-				workAvailable_.wait(lock, [this] { return stopping_ || !queue_.empty(); });
-				if (stopping_ && queue_.empty()) return;
-				task = std::move(queue_.front());
-				queue_.pop();
-				std::erase(task.message, 0);
-				processing_ = true;
+			// Keep the worker alive until process shutdown, sleeping while the queue is empty instead of busy-waiting.
+			while (true) {
+				LogTask task;
+				{
+					std::unique_lock lock(m_mutex);
+					m_work_available.wait(lock, [this] { return m_stopping || !m_queue.empty(); });
+					if (m_stopping && m_queue.empty()) return;
+					task = std::move(m_queue.front());
+					m_queue.pop();
+					std::erase(task.message, 0);
+					m_processing = true;
+				}
+
+				process_message(task);
+				// Release user callbacks outside the runtime lock while the worker still counts as busy.
+				task.before_log_callback.reset();
+				task.after_log_callback.reset();
+
+				call_with_lock([this] {
+					m_processing = false;
+					if (m_queue.empty()) m_finished.notify_all();
+				});
 			}
-
-			processMessage(task);
-			// Release user callbacks outside the runtime lock while the worker still counts as busy.
-			task.beforeLog.reset();
-			task.afterLog.reset();
-
-			withLock([this] {
-				processing_ = false;
-				if (queue_.empty()) finished_.notify_all();
-			});
 		}
-	}
 
-	// Process a complete log message, including line splitting.
-	void processMessage(const LogTask &task) {
-		std::wstring message = task.message;
-		std::size_t newlinePosition;
-		while ((newlinePosition = findNextNewline(message)) != std::wstring::npos) {
-			processSingleLine(task, message.substr(0, newlinePosition));
-			message = message.substr(newlinePosition + 1);
+		// Process a complete log message, splitting it into lines with a single forward scan.
+		void process_message(const LogTask &task) {
+			const std::wstring_view message = task.message;
+			size_t start = 0;
+			while (start < message.size()) {
+				const size_t pos_of_newline = message.find_first_of(L"\r\n", start);
+				if (pos_of_newline == std::wstring_view::npos) break;
+				process_single_line(task, message.substr(start, pos_of_newline - start));
+				start = pos_of_newline + 1;
+			}
+			if (start < message.size()) process_single_line(task, message.substr(start));
 		}
-		if (!message.empty()) processSingleLine(task, message);
-	}
 
-	// Find the position of the next CR or LF newline character.
-	static std::size_t findNextNewline(const std::wstring &message) {
-		const std::size_t carriageReturn = message.find(L'\r');
-		const std::size_t lineFeed = message.find(L'\n');
-		if (carriageReturn == std::wstring::npos) return lineFeed;
-		if (lineFeed == std::wstring::npos) return carriageReturn;
-		return std::min(carriageReturn, lineFeed);
-	}
-
-	// Process one non-empty log line with callbacks and formatting.
-	void processSingleLine(const LogTask &task, const std::wstring &message) {
-		if (message.empty()) return;
-		if (task.beforeLog) {
-			const auto before = *task.beforeLog;
-			try {
-				before();
-			} catch (...) {}
-		}
+		// Process one non-empty log line with callbacks and formatting.
+		void process_single_line(const LogTask &task, const std::wstring_view message) {
+			if (message.empty()) return;
+			if (task.before_log_callback) {
+				const auto before = *task.before_log_callback;
+				try {
+					before();
+				} catch (...) {}
+			}
 #ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
-		console_.updateLogFile();
+			FileLogger::update_if_needed();
 #endif
-		printTimestamp(task.name, task.style);
-		const std::wstring stripped = console_.processColorCodes(message, task.style.textColor, task.style.textAnsiColor, static_cast<bool>(task.afterLog));
-		console_.clearLine();
-		console_.flushLine();
-		if (task.afterLog) {
-			const auto after = *task.afterLog;
-			try {
-				after(message, stripped);
-			} catch (...) {}
+			print_timestamp(*task.name, task.style);
+			const std::wstring stripped = m_console.process_color_codes(message, task.style->text_color_win, task.style->text_color, static_cast<bool>(task.after_log_callback));
+			m_console.clear_line();
+			m_console.flush_line();
+			if (task.after_log_callback) {
+				const auto after = *task.after_log_callback;
+				// Materialize the line only when a callback needs an owning string.
+				const std::wstring owned(message);
+				try {
+					after(owned, stripped);
+				} catch (...) {}
+			}
 		}
+
+		// Print the current time, level, and optional logger name.
+		void print_timestamp(const std::wstring &name, const KlyLogger::LogStyle *style) {
+			// Set cyan for the timestamp bracket when output is a terminal.
+			if (m_console.is_atty()) m_console.set_color(3, "\33[0;36m");
+			m_console.write("\r[");
+			m_console.set_color(3, "\33[0;36m");
+			// Write formatted local time (HH:MM:SS).
+			m_console.write(m_console.timestamp());
+			// Set the level-specific color and write the level text.
+			m_console.set_color(style->level_color_win, style->level_color);
+			m_console.write(style->level);
+			// Reset to cyan for the closing bracket.
+			m_console.set_color(3, "\33[0;36m");
+			m_console.write("] ");
+			// Add the logger name section when a name was supplied.
+			if (!name.empty()) {
+				m_console.write("[");
+				// Process color codes embedded in the logger name.
+				m_console.process_color_codes(name, 3, "\33[0;36m", false);
+				m_console.set_color(3, "\33[0;36m");
+				m_console.write("] ");
+			}
+			// Set the final color for the actual log message.
+			m_console.set_color(style->text_color_win, style->text_color);
+		}
+
+		// Queue lock and worker wake/completion signals.
+		mutable std::mutex m_mutex;
+		std::condition_variable m_work_available;
+		std::condition_variable m_finished;
+		// Log task queue processed by the background thread.
+		std::queue<LogTask> m_queue;
+		// Worker state used by finished() and orderly shutdown.
+		bool m_processing{};
+		bool m_stopping{};
+		// Console/file output backend and its worker thread.
+		Console m_console;
+		std::thread m_worker;
+	};
+
+	// Lazily create one process-wide logging runtime.
+	Runtime &runtime() {
+		static Runtime instance;
+		return instance;
 	}
 
-	// Print the current time, level, and optional logger name.
-	void printTimestamp(const std::wstring &name, const KlyLogger::LogStyle &style) {
-		// Set cyan for the timestamp bracket when output is a terminal.
-		if (console_.isAtty()) console_.setColor(3, "\33[0;36m");
-		console_.write("\r[");
-		console_.setColor(3, "\33[0;36m");
-		// Write formatted local time (HH:MM:SS).
-		console_.write(formatTime(getLocalTime()));
-		// Set the level-specific color and write the level text.
-		console_.setColor(style.levelColor, style.levelAnsiColor);
-		console_.write(style.level);
-		// Reset to cyan for the closing bracket.
-		console_.setColor(3, "\33[0;36m");
-		console_.write("] ");
-		// Add the logger name section when a name was supplied.
-		if (!name.empty()) {
-			console_.write("[");
-			// Process color codes embedded in the logger name.
-			console_.processColorCodes(name, 3, "\33[0;36m", false);
-			console_.setColor(3, "\33[0;36m");
-			console_.write("] ");
-		}
-		// Set the final color for the actual log message.
-		console_.setColor(style.textColor, style.textAnsiColor);
+	// Normalize a logger name by discarding text before its final CR/LF.
+	std::wstring legalize_logger_name(const std::wstring &name) {
+		const size_t last_position = name.find_last_of(L"\r\n");
+		return last_position == std::wstring::npos ? name : name.substr(last_position + 1);
 	}
 
-	// Queue lock and worker wake/completion signals.
-	mutable std::mutex mutex_;
-	std::condition_variable workAvailable_;
-	std::condition_variable finished_;
-	// Log task queue processed by the background thread.
-	std::queue<LogTask> queue_;
-	// Worker state used by finished() and orderly shutdown.
-	bool processing_{};
-	bool stopping_{};
-	// Console/file output backend and its worker thread.
-	Console console_;
-	std::thread worker_;
-};
+	// Shared empty name used when a moved-from logger no longer owns a name.
+	const std::shared_ptr<const std::wstring> &empty_name() {
+		static const auto value = std::make_shared<const std::wstring>();
+		return value;
+	}
 
-// Lazily create one process-wide logging runtime.
-static Runtime &runtime() {
-	static Runtime instance;
-	return instance;
+	// Minimum severity emitted by every logger instance.
+	std::atomic<KlyLogger::LogLevel> &shared_log_level() {
+		static std::atomic level{ KlyLogger::LogLevel::Info };
+		return level;
+	}
 }
 
-// Normalize a logger name by discarding text before its final CR/LF.
-static std::wstring legalizeLoggerName(const std::wstring &loggerName) {
-	const std::size_t carriageReturn = loggerName.find_last_of(L'\r');
-	const std::size_t lineFeed = loggerName.find_last_of(L'\n');
-	const std::size_t lastPosition = carriageReturn == std::wstring::npos ? lineFeed
-		: lineFeed == std::wstring::npos ? carriageReturn : std::max(carriageReturn, lineFeed);
-	return lastPosition == std::wstring::npos ? loggerName : loggerName.substr(lastPosition + 1);
-}
-
-std::string KlyLogger::StringConverter::toString(const std::wstring &str) {
+std::string KlyLogger::StringConverter::to_string(const std::wstring_view str) {
 	if (str.empty()) return {};
-	size_t length = 0;
-	// Query the required output length before allocating the narrow string.
-#ifdef _WIN32
-	if (wcstombs_s(&length, nullptr, 0, str.c_str(), 0)) return { str.begin(), str.end() };
-#else
-	length = wcstombs(nullptr, str.c_str(), 0);
-	if (length == static_cast<size_t>(-1)) return { str.begin(), str.end() };
-	++length;
-#endif
-	std::string result(length, 0);
-	// Convert the wide string with the exact required allocation.
-#ifdef _WIN32
-	size_t convertedLength = 0;
-	if (wcstombs_s(&convertedLength, result.data(), result.size(), str.c_str(), _TRUNCATE)) return { str.begin(), str.end() };
-	result.resize(convertedLength ? convertedLength - 1 : 0);
-#else
-	const size_t convertedLength = wcstombs(result.data(), str.c_str(), result.size());
-	if (convertedLength == static_cast<size_t>(-1)) return { str.begin(), str.end() };
-	result.resize(convertedLength);
-#endif
+
+	// ASCII fast path: code units below 0x80 are never part of a surrogate pair and map one-to-one onto bytes, so pure-ASCII input is filled in place without entering the UTF-8 encoder.
+	std::string result(str.size(), 0);
+	size_t index = 0;
+	while (index < str.size()) {
+		const int code_point = str[index];
+		if (code_point < 0 || code_point > 0x7F) break;
+		result[index++] = static_cast<char>(code_point);
+	}
+	if (index == str.size()) return result;
+
+	// Keep the ASCII prefix and encode the remainder as UTF-8.
+	result.resize(index);
+	while (index < str.size()) {
+		int code_point = str[index];
+		if constexpr (sizeof(wchar_t) == 2) {
+			if (code_point >= 0xD800 && code_point <= 0xDBFF && index + 1 < str.size()) {
+				if (const int trailing = str[index + 1]; trailing >= 0xDC00 && trailing <= 0xDFFF) {
+					code_point = 0x10000 + ((code_point - 0xD800) << 10) + (trailing - 0xDC00);
+					++index;
+				}
+			}
+		}
+		if (code_point < 0 || code_point > 0x10FFFF || (code_point >= 0xD800 && code_point <= 0xDFFF)) code_point = 0xFFFD;
+		// Append the UTF-8 encoding of one Unicode code point to a byte string.
+		if (code_point < 0x80) result.push_back(static_cast<char>(code_point));
+		else if (code_point < 0x800) {
+			result.push_back(static_cast<char>(0xC0 | (code_point >> 6)));
+			result.push_back(static_cast<char>(0x80 | (code_point & 0x3F)));
+		} else if (code_point < 0x10000) {
+			result.push_back(static_cast<char>(0xE0 | (code_point >> 12)));
+			result.push_back(static_cast<char>(0x80 | ((code_point >> 6) & 0x3F)));
+			result.push_back(static_cast<char>(0x80 | (code_point & 0x3F)));
+		} else {
+			result.push_back(static_cast<char>(0xF0 | (code_point >> 18)));
+			result.push_back(static_cast<char>(0x80 | ((code_point >> 12) & 0x3F)));
+			result.push_back(static_cast<char>(0x80 | ((code_point >> 6) & 0x3F)));
+			result.push_back(static_cast<char>(0x80 | (code_point & 0x3F)));
+		}
+		++index;
+	}
 	return result;
 }
 
-std::wstring KlyLogger::StringConverter::toWString(const std::string &str) {
+std::wstring KlyLogger::StringConverter::to_wstring(const std::string_view str) {
 	if (str.empty()) return {};
-	size_t length = 0;
-	// Query the required output length before allocating the wide string.
-#ifdef _WIN32
-	if (mbstowcs_s(&length, nullptr, 0, str.c_str(), 0)) return win32_toWString(str);
-#else
-	length = mbstowcs(nullptr, str.c_str(), 0);
-	if (length == static_cast<size_t>(-1)) return { str.begin(), str.end() };
-	++length;
-#endif
-	std::wstring result(length, 0);
-	// Convert the wide string with the exact required allocation.
-#ifdef _WIN32
-	size_t convertedLength = 0;
-	if (mbstowcs_s(&convertedLength, result.data(), result.size(), str.c_str(), _TRUNCATE)) return win32_toWString(str);
-	result.resize(convertedLength ? convertedLength - 1 : 0);
-#else
-	const size_t convertedLength = mbstowcs(result.data(), str.c_str(), result.size());
-	if (convertedLength == static_cast<size_t>(-1)) return { str.begin(), str.end() };
-	result.resize(convertedLength);
-#endif
-	return result;
-}
 
-#ifdef _WIN32
-std::wstring KlyLogger::StringConverter::win32_toWString(const std::string &str) {
-	if (str.empty()) return {};
-	if (str.size() > static_cast<size_t>((std::numeric_limits<int>::max)())) return { str.begin(), str.end() };
-	const int rawSize = static_cast<int>(str.size());
-	const int length = MultiByteToWideChar(CP_UTF8, 0, str.data(), rawSize, nullptr, 0);
-	if (length == 0) return { str.begin(), str.end() };
-	std::wstring result(static_cast<size_t>(length), 0);
-	const int convertedLength = MultiByteToWideChar(CP_UTF8, 0, str.data(), rawSize, result.data(), length);
-	if (convertedLength == 0) return { str.begin(), str.end() };
-	result.resize(static_cast<size_t>(convertedLength));
+	// ASCII fast path: bytes below 0x80 map one-to-one onto code units, so pure-ASCII input is filled in place without entering the UTF-8 decoder.
+	std::wstring result(str.size(), 0);
+	size_t index = 0;
+	while (index < str.size()) {
+		const auto code_unit = static_cast<unsigned char>(str[index]);
+		if (code_unit > 0x7FU) break;
+		result[index++] = static_cast<wchar_t>(code_unit);
+	}
+	if (index == str.size()) return result;
+
+	// Keep the ASCII prefix and decode the remainder as UTF-8.
+	result.resize(index);
+	while (index < str.size()) {
+		const auto lead = static_cast<unsigned char>(str[index]);
+		int code_point = lead;
+		size_t trailing = 0;
+		if (lead >= 0x80) {
+			if ((lead & 0xE0) == 0xC0) {
+				code_point = lead & 0x1F;
+				trailing = 1;
+			} else if ((lead & 0xF0) == 0xE0) {
+				code_point = lead & 0x0F;
+				trailing = 2;
+			} else if ((lead & 0xF8) == 0xF0) {
+				code_point = lead & 0x07;
+				trailing = 3;
+			} else {
+				append_wide(result, 0xFFFD);
+				++index;
+				continue;
+			}
+		}
+
+		bool valid = index + trailing < str.size();
+		for (size_t offset = 1; valid && offset <= trailing; ++offset) {
+			if (const auto byte = static_cast<unsigned char>(str[index + offset]); (byte & 0xC0u) != 0x80u) valid = false;
+			else code_point = (code_point << 6) | (byte & 0x3F);
+		}
+		// Reject malformed continuation bytes, overlong forms, surrogates and out-of-range values.
+		if (valid)
+			valid = code_point <= 0x10FFFF && (code_point < 0xD800 || code_point > 0xDFFF) &&
+				!((trailing == 1 && code_point < 0x80) || (trailing == 2 && code_point < 0x800) || (trailing == 3 && code_point < 0x10000));
+		if (!valid) {
+			append_wide(result, 0xFFFD);
+			++index;
+			continue;
+		}
+
+		append_wide(result, code_point);
+		index += trailing + 1;
+	}
 	return result;
 }
-#endif
 
 // Construct a logger with no name.
-KlyLogger::KlyLogger() : as_wstring(L"KlyLogger{name=<empty>}"), as_string("KlyLogger{name=<empty>}") {}
+KlyLogger::KlyLogger() : m_name(std::make_shared<const std::wstring>()), m_as_wstring(L"KlyLogger{name=<empty>}"), m_as_string("KlyLogger{name=<empty>}") {}
 
 // Construct a logger with a wide string name.
-KlyLogger::KlyLogger(const std::wstring &loggerName) : name(::legalizeLoggerName(loggerName))
-	, as_wstring(L"KlyLogger{name=" + (name.empty() ? L"<empty>" : name) + L'}'), as_string(StringConverter::toString(as_wstring)) {}
+KlyLogger::KlyLogger(const std::wstring &name) : m_name(std::make_shared<const std::wstring>(legalize_logger_name(name)))
+					, m_as_wstring(L"KlyLogger{name=" + (m_name->empty() ? L"<empty>" : *m_name) + L'}'), m_as_string(StringConverter::to_string(m_as_wstring)) {}
 
 // Construct a logger with a narrow string name.
-KlyLogger::KlyLogger(const std::string &loggerName) : name(::legalizeLoggerName(StringConverter::toWString(loggerName)))
-	, as_wstring(L"KlyLogger{name=" + (loggerName.empty() ? L"<empty>" : name) + L'}'), as_string(StringConverter::toString(as_wstring)) {}
+KlyLogger::KlyLogger(const std::string &name) : m_name(std::make_shared<const std::wstring>(legalize_logger_name(StringConverter::to_wstring(name))))
+					, m_as_wstring(L"KlyLogger{name=" + (m_name->empty() ? L"<empty>" : *m_name) + L'}'), m_as_string(StringConverter::to_string(m_as_wstring)) {}
 
-KlyLogger::KlyLogger(const KlyLogger &logger) : name(logger.name), as_wstring(logger.as_wstring), as_string(logger.as_string) {
-	std::shared_ptr<const BeforeLogCallback> before;
-	std::shared_ptr<const AfterLogCallback> after;
-	runtime().withLock([&] {
-		before = logger.beforeLog;
-		after = logger.afterLog;
-	});
-	if (before) beforeLog = std::make_shared<const BeforeLogCallback>(*before);
-	if (after) afterLog = std::make_shared<const AfterLogCallback>(*after);
+KlyLogger::KlyLogger(const KlyLogger &logger) : m_name(logger.m_name), m_as_wstring(logger.m_as_wstring), m_as_string(logger.m_as_string) {
+	if (const auto before = logger.m_before_log_callback.load())
+		m_before_log_callback.store(std::make_shared<const std::function<void()>>(*before));
+	if (const auto after = logger.m_after_log_callback.load())
+		m_after_log_callback.store(std::make_shared<const std::function<void(const std::wstring &, const std::wstring &)>>(*after));
 }
 
-KlyLogger::KlyLogger(KlyLogger &&logger) noexcept : name(std::move(logger.name)), as_wstring(std::move(logger.as_wstring)), as_string(std::move(logger.as_string)) {
-	runtime().withLock([&] {
-		beforeLog = std::move(logger.beforeLog);
-		afterLog = std::move(logger.afterLog);
-	});
+KlyLogger::KlyLogger(KlyLogger &&logger) noexcept : m_name(std::move(logger.m_name)), m_as_wstring(std::move(logger.m_as_wstring)), m_as_string(std::move(logger.m_as_string)) {
+	m_before_log_callback.store(logger.m_before_log_callback.exchange(nullptr));
+	m_after_log_callback.store(logger.m_after_log_callback.exchange(nullptr));
 }
 
-const std::string &KlyLogger::string() const noexcept { return as_string; }
-const std::wstring &KlyLogger::wstring() const noexcept { return as_wstring; }
+const std::string &KlyLogger::string() const noexcept { return m_as_string; }
+const std::wstring &KlyLogger::wstring() const noexcept { return m_as_wstring; }
 
 // Push a formatted log task to the background queue.
-void KlyLogger::submitLog(std::wstring message, const LogStyle &style) const {
-	runtime().submit(name, std::move(message), style, beforeLog, afterLog);
+void KlyLogger::submit_log(std::wstring message, const LogStyle &style) const {
+	// The log levels always pass one of the static *_STYLE objects, so taking its address is safe: those objects outlive every queued task.
+	runtime().submit(m_name ? m_name : empty_name(), std::move(message), &style, m_before_log_callback.load(), m_after_log_callback.load());
 }
 
-bool KlyLogger::finishedTasks() { return runtime().finished(); }
+bool KlyLogger::is_finished_tasks() { return runtime().finished(); }
 void KlyLogger::wait() { runtime().wait(); }
 
-void KlyLogger::setAfterLog(const std::function<void(const std::wstring &, const std::wstring &)> &func) const {
-	std::shared_ptr<const AfterLogCallback> callback;
-	if (func) callback = std::make_shared<const AfterLogCallback>(func);
-	runtime().withLock([&] { afterLog.swap(callback); });
+// Set the minimum severity emitted by every logger instance; defaults to Info.
+void KlyLogger::set_log_level(const LogLevel level) noexcept { shared_log_level().store(level, std::memory_order_relaxed); }
+
+// Retrieve the minimum severity currently emitted by every logger instance.
+KlyLogger::LogLevel KlyLogger::log_level() noexcept { return shared_log_level().load(std::memory_order_relaxed); }
+
+void KlyLogger::set_after_log_callback(
+	const std::function<void(const std::wstring &, const std::wstring &)> &func) const {
+	if (func) m_after_log_callback.store(std::make_shared<const std::function<void(const std::wstring &, const std::wstring &)>>(func));
+	else m_after_log_callback.store(nullptr);
 }
 
-void KlyLogger::setBeforeLog(const std::function<void()> &func) const {
-	std::shared_ptr<const BeforeLogCallback> callback;
-	if (func) callback = std::make_shared<const BeforeLogCallback>(func);
-	runtime().withLock([&] { beforeLog.swap(callback); });
+void KlyLogger::set_before_log_callback(const std::function<void()> &func) const {
+	if (func) m_before_log_callback.store(std::make_shared<const std::function<void()>>(func));
+	else m_before_log_callback.store(nullptr);
 }
 
 // Convert the tagged C argument array into fmt's runtime argument store, then format the complete string in one pass.
 // This preserves fmt's full parser, including positional arguments and nested dynamic width/precision fields.
-static std::wstring formatCMessage(const std::wstring &format, const KlyLoggerFormatArg *arguments, const std::size_t argumentCount) {
+static std::wstring c_format_message(const std::wstring &format, const KlyLoggerFormatArg *arguments, const size_t count) {
 	try {
-		if (!arguments && argumentCount != 0) throw fmt::format_error("Format arguments are null");
+		if (!arguments && count != 0) throw fmt::format_error("Format arguments are null!");
 		fmt::dynamic_format_arg_store<fmt::wformat_context> store;
-		for (std::size_t index = 0; index < argumentCount; ++index) {
+		for (size_t index = 0; index < count; ++index) {
 			switch (const KlyLoggerFormatArg &argument = arguments[index]; argument.type) {
-			case KLY_LOGGER_FORMAT_SIGNED_INTEGER:
-				store.push_back(argument.value.signed_integer);
-				break;
-			case KLY_LOGGER_FORMAT_UNSIGNED_INTEGER:
-				store.push_back(argument.value.unsigned_integer);
-				break;
-			case KLY_LOGGER_FORMAT_FLOATING_POINT:
-				store.push_back(argument.value.floating_point);
-				break;
-			case KLY_LOGGER_FORMAT_LONG_DOUBLE:
-				store.push_back(argument.value.long_double_value);
-				break;
-			case KLY_LOGGER_FORMAT_BOOLEAN:
-				store.push_back(argument.value.boolean);
-				break;
-			case KLY_LOGGER_FORMAT_CHARACTER:
-				store.push_back(static_cast<wchar_t>(argument.value.character));
-				break;
-			case KLY_LOGGER_FORMAT_WIDE_CHARACTER:
-				store.push_back(argument.value.wide_character);
-				break;
-			case KLY_LOGGER_FORMAT_STRING:
-				store.push_back(argument.value.string ? KlyLogger::StringConverter::toWString(argument.value.string) : std::wstring());
-				break;
-			case KLY_LOGGER_FORMAT_WIDE_STRING:
-				store.push_back(std::wstring(argument.value.wide_string ? argument.value.wide_string : L""));
-				break;
-			case KLY_LOGGER_FORMAT_POINTER:
-				store.push_back(argument.value.pointer);
-				break;
-			default:
-				throw fmt::format_error("Unknown KlyLoggerFormatArg type");
+				case KLY_LOGGER_FORMAT_SIGNED_INTEGER:
+					store.push_back(argument.value.signed_integer);
+					break;
+				case KLY_LOGGER_FORMAT_UNSIGNED_INTEGER:
+					store.push_back(argument.value.unsigned_integer);
+					break;
+				case KLY_LOGGER_FORMAT_FLOATING_POINT:
+					store.push_back(argument.value.floating_point);
+					break;
+				case KLY_LOGGER_FORMAT_LONG_DOUBLE:
+					store.push_back(argument.value.long_double_value);
+					break;
+				case KLY_LOGGER_FORMAT_BOOLEAN:
+					store.push_back(argument.value.boolean);
+					break;
+				case KLY_LOGGER_FORMAT_CHARACTER:
+					store.push_back(static_cast<wchar_t>(argument.value.character));
+					break;
+				case KLY_LOGGER_FORMAT_WIDE_CHARACTER:
+					store.push_back(argument.value.wide_character);
+					break;
+				case KLY_LOGGER_FORMAT_STRING:
+					store.push_back(argument.value.string ? KlyLogger::StringConverter::to_wstring(argument.value.string) : std::wstring());
+					break;
+				case KLY_LOGGER_FORMAT_WIDE_STRING:
+					store.push_back(std::wstring(argument.value.wide_string ? argument.value.wide_string : L""));
+					break;
+				case KLY_LOGGER_FORMAT_POINTER:
+					store.push_back(argument.value.pointer);
+					break;
+				default:
+					throw fmt::format_error("Unknown KlyLoggerFormatArg type");
 			}
 		}
 		return fmt::vformat(fmt::wstring_view(format), store);
-	} catch (const std::exception &error) {
-		return format + L"\xa78\247o (" + KlyLogger::StringConverter::toWString(error.what()) + L')';
+	} catch (const std::exception &exception) {
+		const char *exception_type = typeid(exception).name();
+#ifdef _WIN32
+		// Skip the "class " prefix in MSVC ABI type names.
+		exception_type = exception_type + 6;
+#endif
+		return format + L"\xa78\247o (" + KlyLogger::StringConverter::to_wstring(fmt::format("{}: {}", exception_type, exception.what())) + L')';
 	}
 }
 
-enum class CLogLevel { info, warn, error, fatal };
+static void c_log_formatted(const KlyLogger &logger, const KlyLogger::LogLevel level, const std::wstring &format, const KlyLoggerFormatArg *arguments, const size_t count) {
+	// Drop filtered messages before formatting so they cost nothing.
+	if (level < KlyLogger::log_level()) return;
 
-static void logCFormatted(const KlyLogger &logger, const CLogLevel level, const std::wstring &format, const KlyLoggerFormatArg *arguments, const std::size_t argumentCount) {
-	const std::wstring message = formatCMessage(format, arguments, argumentCount);
+	const std::wstring message = c_format_message(format, arguments, count);
 	switch (level) {
-		case CLogLevel::info:
+		case KlyLogger::LogLevel::Debug:
+			logger.debug(message);
+			break;
+		case KlyLogger::LogLevel::Info:
 			logger.info(message);
 			break;
-		case CLogLevel::warn:
+		case KlyLogger::LogLevel::Warn:
 			logger.warn(message);
 			break;
-		case CLogLevel::error:
+		case KlyLogger::LogLevel::Error:
 			logger.error(message);
 			break;
-		case CLogLevel::fatal:
+		case KlyLogger::LogLevel::Fatal:
 			logger.fatal(message);
 			break;
 	}
 }
 
+// C linkage wrappers preserve the C++ logger behavior behind an opaque handle.
+extern "C" {
 // Private C-handle representation that owns the public C++ logger object.
 struct KlyLoggerHandleStruct {
 	KlyLogger logger;
 };
-
-// C linkage wrappers preserve the C++ logger behavior behind an opaque handle.
-extern "C" {
 
 KlyLoggerHandle kly_logger_create() {
 	try {
@@ -770,101 +859,95 @@ KlyLoggerHandle kly_logger_create_named_narrow(const char *name) {
 	}
 }
 
-void kly_logger_destroy(const KlyLoggerHandle logger) {
-	delete logger;
+void kly_logger_destroy(const KlyLoggerHandle logger) { delete logger; }
+
+const char *kly_logger_string(const KlyLoggerHandle logger) { return logger ? logger->logger.string().c_str() : nullptr; }
+
+const wchar_t *kly_logger_wstring(const KlyLoggerHandle logger) { return logger ? logger->logger.wstring().c_str() : nullptr; }
+
+void kly_logger_debug(const KlyLoggerHandle logger, const wchar_t *message) { if (logger) logger->logger.debug(message ? message : L""); }
+
+void kly_logger_info(const KlyLoggerHandle logger, const wchar_t *message) { if (logger) logger->logger.info(message ? message : L""); }
+
+void kly_logger_warn(const KlyLoggerHandle logger, const wchar_t *message) { if (logger) logger->logger.warn(message ? message : L""); }
+
+void kly_logger_error(const KlyLoggerHandle logger, const wchar_t *message) { if (logger) logger->logger.error(message ? message : L""); }
+
+void kly_logger_fatal(const KlyLoggerHandle logger, const wchar_t *message) { if (logger) logger->logger.fatal(message ? message : L""); }
+
+void kly_logger_detail_debug_args(const KlyLoggerHandle logger, const wchar_t *format, const KlyLoggerFormatArg *arguments, const size_t count) {
+	if (logger) c_log_formatted(logger->logger, KlyLogger::LogLevel::Debug, format ? format : L"", arguments, count);
 }
 
-const char *kly_logger_string(const KlyLoggerHandle logger) {
-	return logger ? logger->logger.string().c_str() : nullptr;
+void kly_logger_detail_info_args(const KlyLoggerHandle logger, const wchar_t *format, const KlyLoggerFormatArg *arguments, const size_t count) {
+	if (logger) c_log_formatted(logger->logger, KlyLogger::LogLevel::Info, format ? format : L"", arguments, count);
 }
 
-const wchar_t *kly_logger_wstring(const KlyLoggerHandle logger) {
-	return logger ? logger->logger.wstring().c_str() : nullptr;
+void kly_logger_detail_warn_args(const KlyLoggerHandle logger, const wchar_t *format, const KlyLoggerFormatArg *arguments, const size_t count) {
+	if (logger) c_log_formatted(logger->logger, KlyLogger::LogLevel::Warn, format ? format : L"", arguments, count);
 }
 
-void kly_logger_info(const KlyLoggerHandle logger, const wchar_t *message) {
-	if (logger) logger->logger.info(message ? message : L"");
+void kly_logger_detail_error_args(const KlyLoggerHandle logger, const wchar_t *format, const KlyLoggerFormatArg *arguments, const size_t count) {
+	if (logger) c_log_formatted(logger->logger, KlyLogger::LogLevel::Error, format ? format : L"", arguments, count);
 }
 
-void kly_logger_warn(const KlyLoggerHandle logger, const wchar_t *message) {
-	if (logger) logger->logger.warn(message ? message : L"");
+void kly_logger_detail_fatal_args(const KlyLoggerHandle logger, const wchar_t *format, const KlyLoggerFormatArg *arguments, const size_t count) {
+	if (logger) c_log_formatted(logger->logger, KlyLogger::LogLevel::Fatal, format ? format : L"", arguments, count);
 }
 
-void kly_logger_error(const KlyLoggerHandle logger, const wchar_t *message) {
-	if (logger) logger->logger.error(message ? message : L"");
+void kly_logger_debug_narrow(const KlyLoggerHandle logger, const char *message) { if (logger) logger->logger.debug(message ? message : ""); }
+
+void kly_logger_info_narrow(const KlyLoggerHandle logger, const char *message) { if (logger) logger->logger.info(message ? message : ""); }
+
+void kly_logger_warn_narrow(const KlyLoggerHandle logger, const char *message) { if (logger) logger->logger.warn(message ? message : ""); }
+
+void kly_logger_error_narrow(const KlyLoggerHandle logger, const char *message) { if (logger) logger->logger.error(message ? message : ""); }
+
+void kly_logger_fatal_narrow(const KlyLoggerHandle logger, const char *message) { if (logger) logger->logger.fatal(message ? message : ""); }
+
+void kly_logger_detail_debug_narrow_args(const KlyLoggerHandle logger, const char *format, const KlyLoggerFormatArg *arguments, const size_t count) {
+	if (logger) c_log_formatted(logger->logger, KlyLogger::LogLevel::Debug, KlyLogger::StringConverter::to_wstring(format ? format : ""), arguments, count);
 }
 
-void kly_logger_fatal(const KlyLoggerHandle logger, const wchar_t *message) {
-	if (logger) logger->logger.fatal(message ? message : L"");
+void kly_logger_detail_info_narrow_args(const KlyLoggerHandle logger, const char *format, const KlyLoggerFormatArg *arguments, const size_t count) {
+	if (logger) c_log_formatted(logger->logger, KlyLogger::LogLevel::Info, KlyLogger::StringConverter::to_wstring(format ? format : ""), arguments, count);
 }
 
-void kly_logger_detail_info_args(const KlyLoggerHandle logger, const wchar_t *format, const KlyLoggerFormatArg *arguments, const size_t argument_count) {
-	if (logger) logCFormatted(logger->logger, CLogLevel::info, format ? format : L"", arguments, argument_count);
+void kly_logger_detail_warn_narrow_args(const KlyLoggerHandle logger, const char *format, const KlyLoggerFormatArg *arguments, const size_t count) {
+	if (logger) c_log_formatted(logger->logger, KlyLogger::LogLevel::Warn, KlyLogger::StringConverter::to_wstring(format ? format : ""), arguments, count);
 }
 
-void kly_logger_detail_warn_args(const KlyLoggerHandle logger, const wchar_t *format, const KlyLoggerFormatArg *arguments, const size_t argument_count) {
-	if (logger) logCFormatted(logger->logger, CLogLevel::warn, format ? format : L"", arguments, argument_count);
+void kly_logger_detail_error_narrow_args(const KlyLoggerHandle logger, const char *format, const KlyLoggerFormatArg *arguments, const size_t count) {
+	if (logger) c_log_formatted(logger->logger, KlyLogger::LogLevel::Error, KlyLogger::StringConverter::to_wstring(format ? format : ""), arguments, count);
 }
 
-void kly_logger_detail_error_args(const KlyLoggerHandle logger, const wchar_t *format, const KlyLoggerFormatArg *arguments, const size_t argument_count) {
-	if (logger) logCFormatted(logger->logger, CLogLevel::error, format ? format : L"", arguments, argument_count);
+void kly_logger_detail_fatal_narrow_args(const KlyLoggerHandle logger, const char *format, const KlyLoggerFormatArg *arguments, const size_t count) {
+	if (logger) c_log_formatted(logger->logger, KlyLogger::LogLevel::Fatal, KlyLogger::StringConverter::to_wstring(format ? format : ""), arguments, count);
 }
 
-void kly_logger_detail_fatal_args(const KlyLoggerHandle logger, const wchar_t *format, const KlyLoggerFormatArg *arguments, const size_t argument_count) {
-	if (logger) logCFormatted(logger->logger, CLogLevel::fatal, format ? format : L"", arguments, argument_count);
-}
-
-void kly_logger_info_narrow(const KlyLoggerHandle logger, const char *message) {
-	if (logger) logger->logger.info(message ? message : "");
-}
-
-void kly_logger_warn_narrow(const KlyLoggerHandle logger, const char *message) {
-	if (logger) logger->logger.warn(message ? message : "");
-}
-
-void kly_logger_error_narrow(const KlyLoggerHandle logger, const char *message) {
-	if (logger) logger->logger.error(message ? message : "");
-}
-
-void kly_logger_fatal_narrow(const KlyLoggerHandle logger, const char *message) {
-	if (logger) logger->logger.fatal(message ? message : "");
-}
-
-void kly_logger_detail_info_narrow_args(const KlyLoggerHandle logger, const char *format, const KlyLoggerFormatArg *arguments, const size_t argument_count) {
-	if (logger) logCFormatted(logger->logger, CLogLevel::info, KlyLogger::StringConverter::toWString(format ? format : ""), arguments, argument_count);
-}
-
-void kly_logger_detail_warn_narrow_args(const KlyLoggerHandle logger, const char *format, const KlyLoggerFormatArg *arguments, const size_t argument_count) {
-	if (logger) logCFormatted(logger->logger, CLogLevel::warn, KlyLogger::StringConverter::toWString(format ? format : ""), arguments, argument_count);
-}
-
-void kly_logger_detail_error_narrow_args(const KlyLoggerHandle logger, const char *format, const KlyLoggerFormatArg *arguments, const size_t argument_count) {
-	if (logger) logCFormatted(logger->logger, CLogLevel::error, KlyLogger::StringConverter::toWString(format ? format : ""), arguments, argument_count);
-}
-
-void kly_logger_detail_fatal_narrow_args(const KlyLoggerHandle logger, const char *format, const KlyLoggerFormatArg *arguments, const size_t argument_count) {
-	if (logger) logCFormatted(logger->logger, CLogLevel::fatal, KlyLogger::StringConverter::toWString(format ? format : ""), arguments, argument_count);
-}
-
-bool kly_logger_finished_tasks() { return KlyLogger::finishedTasks(); }
+bool kly_logger_finished_tasks() { return KlyLogger::is_finished_tasks(); }
 void kly_logger_wait() { KlyLogger::wait(); }
 
-void kly_logger_set_before_log(const KlyLoggerHandle logger, KlyLoggerBeforeLogCallback callback) {
+void kly_logger_set_log_level(const KlyLoggerLogLevel level) { KlyLogger::set_log_level(static_cast<KlyLogger::LogLevel>(level)); }
+
+KlyLoggerLogLevel kly_logger_log_level() { return static_cast<KlyLoggerLogLevel>(KlyLogger::log_level()); }
+
+void kly_logger_set_before_log_callback(const KlyLoggerHandle logger, const KlyLoggerBeforeLogCallback callback) {
 	if (!logger) return;
 	if (!callback) {
-		logger->logger.setBeforeLog({});
+		logger->logger.set_before_log_callback({});
 		return;
 	}
-	logger->logger.setBeforeLog(callback);
+	logger->logger.set_before_log_callback(callback);
 }
 
-void kly_logger_set_after_log(const KlyLoggerHandle logger, KlyLoggerAfterLogCallback callback) {
+void kly_logger_set_after_log_callback(const KlyLoggerHandle logger, const KlyLoggerAfterLogCallback callback) {
 	if (!logger) return;
 	if (!callback) {
-		logger->logger.setAfterLog({});
+		logger->logger.set_after_log_callback({});
 		return;
 	}
-	logger->logger.setAfterLog([callback](const std::wstring &original, const std::wstring &plain) {
+	logger->logger.set_after_log_callback([callback](const std::wstring &original, const std::wstring &plain) {
 		callback(original.c_str(), plain.c_str());
 	});
 }

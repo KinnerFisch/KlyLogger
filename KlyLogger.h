@@ -1,4 +1,6 @@
 /*
+ * Copyright (c) 2024-2026 KinnerFisch
+ *
  * Boost Software License - Version 1.0 - August 17th, 2003
  *
  * Permission is hereby granted, free of charge, to any person or organization
@@ -67,6 +69,16 @@ typedef enum KlyLoggerFormatArgType {
 	KLY_LOGGER_FORMAT_POINTER
 } KlyLoggerFormatArgType;
 
+// Severity levels for runtime filtering; a message is dropped when its level is below the selected minimum.
+// The numeric order must stay in sync with KlyLogger::LogLevel so the values can be converted directly.
+typedef enum KlyLoggerLogLevel {
+	KLY_LOGGER_LOG_LEVEL_DEBUG,
+	KLY_LOGGER_LOG_LEVEL_INFO,
+	KLY_LOGGER_LOG_LEVEL_WARN,
+	KLY_LOGGER_LOG_LEVEL_ERROR,
+	KLY_LOGGER_LOG_LEVEL_FATAL
+} KlyLoggerLogLevel;
+
 // One tagged formatting argument. Normal calls create these values automatically;
 // the explicit type remains available for advanced use.
 // String and pointer values are borrowed only for the duration of the call.
@@ -87,61 +99,61 @@ typedef struct KlyLoggerFormatArg {
 } KlyLoggerFormatArg;
 
 KLY_LOGGER_DETAIL_INLINE KlyLoggerFormatArg kly_logger_arg_signed(const int64_t value) {
-	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_SIGNED_INTEGER, { 0 } };
+	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_SIGNED_INTEGER, {} };
 	result.value.signed_integer = value;
 	return result;
 }
 
 KLY_LOGGER_DETAIL_INLINE KlyLoggerFormatArg kly_logger_arg_unsigned(const uint64_t value) {
-	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_UNSIGNED_INTEGER, { 0 } };
+	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_UNSIGNED_INTEGER, {} };
 	result.value.unsigned_integer = value;
 	return result;
 }
 
 KLY_LOGGER_DETAIL_INLINE KlyLoggerFormatArg kly_logger_arg_double(const double value) {
-	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_FLOATING_POINT, { 0 } };
+	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_FLOATING_POINT, {} };
 	result.value.floating_point = value;
 	return result;
 }
 
 KLY_LOGGER_DETAIL_INLINE KlyLoggerFormatArg kly_logger_arg_long_double(const long double value) {
-	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_LONG_DOUBLE, { 0 } };
+	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_LONG_DOUBLE, {} };
 	result.value.long_double_value = value;
 	return result;
 }
 
 KLY_LOGGER_DETAIL_INLINE KlyLoggerFormatArg kly_logger_arg_bool(const bool value) {
-	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_BOOLEAN, { 0 } };
+	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_BOOLEAN, {} };
 	result.value.boolean = value;
 	return result;
 }
 
 KLY_LOGGER_DETAIL_INLINE KlyLoggerFormatArg kly_logger_arg_char(const char value) {
-	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_CHARACTER, { 0 } };
+	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_CHARACTER, {} };
 	result.value.character = value;
 	return result;
 }
 
 KLY_LOGGER_DETAIL_INLINE KlyLoggerFormatArg kly_logger_arg_wchar(const wchar_t value) {
-	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_WIDE_CHARACTER, { 0 } };
+	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_WIDE_CHARACTER, {} };
 	result.value.wide_character = value;
 	return result;
 }
 
 KLY_LOGGER_DETAIL_INLINE KlyLoggerFormatArg kly_logger_arg_string(const char *value) {
-	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_STRING, { 0 } };
+	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_STRING, {} };
 	result.value.string = value;
 	return result;
 }
 
 KLY_LOGGER_DETAIL_INLINE KlyLoggerFormatArg kly_logger_arg_wstring(const wchar_t *value) {
-	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_WIDE_STRING, { 0 } };
+	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_WIDE_STRING, {} };
 	result.value.wide_string = value;
 	return result;
 }
 
 KLY_LOGGER_DETAIL_INLINE KlyLoggerFormatArg kly_logger_arg_pointer(const void *value) {
-	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_POINTER, { 0 } };
+	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_POINTER, {} };
 	result.value.pointer = value;
 	return result;
 }
@@ -213,46 +225,53 @@ const char *kly_logger_string(KlyLoggerHandle logger);
 // Retrieve the logger description as a wide string. The returned pointer is owned by the logger and remains valid until that logger is destroyed.
 const wchar_t *kly_logger_wstring(KlyLoggerHandle logger);
 
-// Log wide-string messages at the four supported levels.
+// Log wide-string messages at the five supported levels.
+void kly_logger_debug(KlyLoggerHandle logger, const wchar_t *message);
 void kly_logger_info(KlyLoggerHandle logger, const wchar_t *message);
 void kly_logger_warn(KlyLoggerHandle logger, const wchar_t *message);
 void kly_logger_error(KlyLoggerHandle logger, const wchar_t *message);
 void kly_logger_fatal(KlyLoggerHandle logger, const wchar_t *message);
 
-// Internal bridges used by the C11 convenience macros below. Applications should call kly_logger_info/warn/error/fatal instead.
-void kly_logger_detail_info_args(KlyLoggerHandle logger, const wchar_t *format, const KlyLoggerFormatArg *arguments, size_t argument_count);
-void kly_logger_detail_warn_args(KlyLoggerHandle logger, const wchar_t *format, const KlyLoggerFormatArg *arguments, size_t argument_count);
-void kly_logger_detail_error_args(KlyLoggerHandle logger, const wchar_t *format, const KlyLoggerFormatArg *arguments, size_t argument_count);
-void kly_logger_detail_fatal_args(KlyLoggerHandle logger, const wchar_t *format, const KlyLoggerFormatArg *arguments, size_t argument_count);
+// Internal bridges used by the C11 convenience macros below. Applications should call kly_logger_debug/info/warn/error/fatal instead.
+void kly_logger_detail_debug_args(KlyLoggerHandle logger, const wchar_t *format, const KlyLoggerFormatArg *arguments, size_t count);
+void kly_logger_detail_info_args(KlyLoggerHandle logger, const wchar_t *format, const KlyLoggerFormatArg *arguments, size_t count);
+void kly_logger_detail_warn_args(KlyLoggerHandle logger, const wchar_t *format, const KlyLoggerFormatArg *arguments, size_t count);
+void kly_logger_detail_error_args(KlyLoggerHandle logger, const wchar_t *format, const KlyLoggerFormatArg *arguments, size_t count);
+void kly_logger_detail_fatal_args(KlyLoggerHandle logger, const wchar_t *format, const KlyLoggerFormatArg *arguments, size_t count);
 
-// Log narrow-string messages at the four supported levels.
+// Log narrow-string messages at the five supported levels.
+void kly_logger_debug_narrow(KlyLoggerHandle logger, const char *message);
 void kly_logger_info_narrow(KlyLoggerHandle logger, const char *message);
 void kly_logger_warn_narrow(KlyLoggerHandle logger, const char *message);
 void kly_logger_error_narrow(KlyLoggerHandle logger, const char *message);
 void kly_logger_fatal_narrow(KlyLoggerHandle logger, const char *message);
 
 // Internal narrow-string bridges used by the convenience macros.
-void kly_logger_detail_info_narrow_args(KlyLoggerHandle logger, const char *format, const KlyLoggerFormatArg *arguments, size_t argument_count);
-void kly_logger_detail_warn_narrow_args(KlyLoggerHandle logger, const char *format, const KlyLoggerFormatArg *arguments, size_t argument_count);
-void kly_logger_detail_error_narrow_args(KlyLoggerHandle logger, const char *format, const KlyLoggerFormatArg *arguments, size_t argument_count);
-void kly_logger_detail_fatal_narrow_args(KlyLoggerHandle logger, const char *format, const KlyLoggerFormatArg *arguments, size_t argument_count);
+void kly_logger_detail_debug_narrow_args(KlyLoggerHandle logger, const char *format, const KlyLoggerFormatArg *arguments, size_t count);
+void kly_logger_detail_info_narrow_args(KlyLoggerHandle logger, const char *format, const KlyLoggerFormatArg *arguments, size_t count);
+void kly_logger_detail_warn_narrow_args(KlyLoggerHandle logger, const char *format, const KlyLoggerFormatArg *arguments, size_t count);
+void kly_logger_detail_error_narrow_args(KlyLoggerHandle logger, const char *format, const KlyLoggerFormatArg *arguments, size_t count);
+void kly_logger_detail_fatal_narrow_args(KlyLoggerHandle logger, const char *format, const KlyLoggerFormatArg *arguments, size_t count);
 
 // Check whether all pending log tasks have been processed.
 bool kly_logger_finished_tasks();
 // Block the current thread until all log output is complete.
 void kly_logger_wait();
 // Register callbacks that run before or after each output line. Pass NULL to clear the corresponding callback.
-void kly_logger_set_before_log(KlyLoggerHandle logger, KlyLoggerBeforeLogCallback callback);
-void kly_logger_set_after_log(KlyLoggerHandle logger, KlyLoggerAfterLogCallback callback);
+void kly_logger_set_before_log_callback(KlyLoggerHandle logger, KlyLoggerBeforeLogCallback callback);
+void kly_logger_set_after_log_callback(KlyLoggerHandle logger, KlyLoggerAfterLogCallback callback);
+// Set the process-wide minimum severity emitted by every logger. Defaults to KLY_LOGGER_LOG_LEVEL_INFO.
+void kly_logger_set_log_level(KlyLoggerLogLevel level);
+// Retrieve the process-wide minimum severity currently in effect.
+KlyLoggerLogLevel kly_logger_log_level();
 
 #ifdef __cplusplus
 }
 #else
 typedef KlyLoggerHandle KlyLogger;
 
-// C cannot recover argument types from a raw va_list: unlike printf's %d/%ls,
-// a {} field does not encode a type. These C11 macros provide the same call shape
-// while using _Generic to preserve each type and deriving the count at compile time.
+// C cannot recover argument types from a raw va_list: unlike printf's %d/%ls, a {} field does not encode a type.
+// These C11 macros provide the same call shape while using _Generic to preserve each type and deriving the count at compile time.
 // Up to 16 formatting arguments are accepted per call.
 #define KLY_LOGGER_DETAIL_CAT_RAW(left, right) left##right
 #define KLY_LOGGER_DETAIL_CAT(left, right) KLY_LOGGER_DETAIL_CAT_RAW(left, right)
@@ -299,10 +318,12 @@ typedef KlyLoggerHandle KlyLogger;
 #define KLY_LOGGER_DETAIL_DISPATCH_RAW(count, ...) KLY_LOGGER_DETAIL_CAT(KLY_LOGGER_DETAIL_CALL_, count)(__VA_ARGS__)
 #define KLY_LOGGER_DETAIL_DISPATCH(message_function, format_function, ...) KLY_LOGGER_DETAIL_DISPATCH_RAW(KLY_LOGGER_DETAIL_COUNT(__VA_ARGS__), message_function, format_function, __VA_ARGS__)
 
+#define kly_logger_debug(...) KLY_LOGGER_DETAIL_DISPATCH(kly_logger_debug, kly_logger_detail_debug_args, __VA_ARGS__)
 #define kly_logger_info(...) KLY_LOGGER_DETAIL_DISPATCH(kly_logger_info, kly_logger_detail_info_args, __VA_ARGS__)
 #define kly_logger_warn(...) KLY_LOGGER_DETAIL_DISPATCH(kly_logger_warn, kly_logger_detail_warn_args, __VA_ARGS__)
 #define kly_logger_error(...) KLY_LOGGER_DETAIL_DISPATCH(kly_logger_error, kly_logger_detail_error_args, __VA_ARGS__)
 #define kly_logger_fatal(...) KLY_LOGGER_DETAIL_DISPATCH(kly_logger_fatal, kly_logger_detail_fatal_args, __VA_ARGS__)
+#define kly_logger_debug_narrow(...) KLY_LOGGER_DETAIL_DISPATCH(kly_logger_debug_narrow, kly_logger_detail_debug_narrow_args, __VA_ARGS__)
 #define kly_logger_info_narrow(...) KLY_LOGGER_DETAIL_DISPATCH(kly_logger_info_narrow, kly_logger_detail_info_narrow_args, __VA_ARGS__)
 #define kly_logger_warn_narrow(...) KLY_LOGGER_DETAIL_DISPATCH(kly_logger_warn_narrow, kly_logger_detail_warn_narrow_args, __VA_ARGS__)
 #define kly_logger_error_narrow(...) KLY_LOGGER_DETAIL_DISPATCH(kly_logger_error_narrow, kly_logger_detail_error_narrow_args, __VA_ARGS__)

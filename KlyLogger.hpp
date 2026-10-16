@@ -1,4 +1,6 @@
 /*
+ * Copyright (c) 2024-2026 KinnerFisch
+ *
  * Boost Software License - Version 1.0 - August 17th, 2003
  *
  * Permission is hereby granted, free of charge, to any person or organization
@@ -29,120 +31,104 @@
 #ifndef KLY_LOGGER_INCLUDED
 #define KLY_LOGGER_INCLUDED
 
-#include <exception>
 #include <functional>
-#include <locale>
 #include <memory>
-#include <string>
-#include <tuple>
-#include <type_traits>
-#include <utility>
 
-#include <fmt/format.h>
 #include <fmt/xchar.h>
-
-// Type traits for string conversion.
-template<typename T, typename = void>
-struct has_string : std::false_type {};
-
-template<typename T>
-struct has_string<T, std::void_t<decltype(std::declval<T>().string())>> : std::true_type {};
-
-template<typename T, typename = void>
-struct has_wstring : std::false_type {};
-
-template<typename T>
-struct has_wstring<T, std::void_t<decltype(std::declval<T>().wstring())>> : std::true_type {};
 
 // KlyLogger: A lightweight, color console and file logging library for C++.
 class KlyLogger {
+	// Type traits for string conversion.
+	template<typename T, typename = void>
+	struct has_string : std::false_type {};
+
+	template<typename T>
+	struct has_string<T, std::void_t<decltype(std::declval<T>().string())>> : std::true_type {};
+
+	template<typename T, typename = void>
+	struct has_wstring : std::false_type {};
+
+	template<typename T>
+	struct has_wstring<T, std::void_t<decltype(std::declval<T>().wstring())>> : std::true_type {};
+
 public:
+	// Severity levels used for runtime filtering; a message is dropped when its level is below the minimum selected by KlyLogger::set_log_level.
+	enum class LogLevel { Debug, Info, Warn, Error, Fatal };
+
 	// LogStyle encapsulates all visual and textual attributes for a log level, including level name, Windows console colors, and ANSI escape sequences.
 	struct LogStyle {
-		std::string level, levelAnsiColor, textAnsiColor;
-		uint16_t levelColor, textColor;
+		std::string level, level_color, text_color;
+		uint16_t level_color_win, text_color_win;
 	};
 
-	static const LogStyle INFO_STYLE, WARN_STYLE, ERROR_STYLE, FATAL_STYLE;
+	static const LogStyle DEBUG_STYLE, INFO_STYLE, WARN_STYLE, ERROR_STYLE, FATAL_STYLE;
 
 	// String conversion utilities.
 	class StringConverter {
 	public:
-		// Convert wide string to narrow string.
-		static std::string toString(const std::wstring &str);
+		// Convert wide string to narrow string as UTF-8.
+		static std::string to_string(std::wstring_view str);
 
-		// Convert narrow string to wide string safely.
-		static std::wstring toWString(const std::string &str);
-
-		// Decode UTF-8 with the Windows conversion API.
-#ifdef _WIN32
-		static std::wstring win32_toWString(const std::string &str);
-#endif
+		// Convert narrow string to wide string safely as UTF-8.
+		static std::wstring to_wstring(std::string_view str);
 
 		// Convert formatting inputs into values or references without shared temporary storage.
 		template<typename T>
-		static decltype(auto) convertFormattingValue(const T &arg) {
-			if constexpr (std::is_same_v<T, std::string> || std::is_convertible_v<T, const char *>) return toWString(arg);
+		static decltype(auto) convert_formatting_value(const T &arg) {
+			if constexpr (std::is_same_v<T, std::nullptr_t>) return L"nullptr";
+			else if constexpr (std::is_same_v<T, std::string> || std::is_convertible_v<T, const char *>) return to_wstring(arg);
 			else if constexpr (has_wstring<T>::value) return std::wstring(arg.wstring());
-			else if constexpr (has_string<T>::value) return toWString(arg.string());
-			else return (arg);
-		}
-
-		// Convert any argument into std::wstring for formatting. Returns the original value if already wide string, otherwise uses fmt::format.
-		template<typename T>
-		static std::wstring convertArgumentToWString(const T &arg) {
-			// If already a std::wstring or convertible to const wchar_t*, return directly.
-			if constexpr (std::is_same_v<T, std::wstring> || std::is_convertible_v<T, const wchar_t *>) return std::wstring(arg);
-			// Otherwise, format the argument into a wide string using fmt::format.
-			else return fmt::format(L"{}", arg);
+			else if constexpr (has_string<T>::value) return to_wstring(arg.string());
+			else return arg;
 		}
 
 		// Format a message with optional arguments, returning the formatted wide string.
 		template<typename MessageType, typename... Args>
-		static std::wstring formatMessage(const MessageType &message, const Args &...args) {
-			// Convert message to wide string format.
-			const auto convertedMessage = convertFormattingValue(message);
-			const std::wstring msg = convertArgumentToWString(convertedMessage);
-			std::wstring formatted = msg;
-
-			// Format message with arguments if provided.
-			if constexpr (sizeof...(args) > 0) {
+		static std::wstring format_message(const MessageType &message, const Args &...args) {
+			// Without arguments the converted message is already the final result, so return it directly and skip the extra copy the formatted buffer would otherwise make.
+			if constexpr (sizeof...(args) == 0) return convert_formatting_value(message);
+			else {
+				// Convert message to wide string format.
+				const std::wstring msg = convert_formatting_value(message);
 				try {
 					// Keep converted arguments alive for the complete formatting call.
-					std::tuple<decltype(convertFormattingValue(args))...> convertedArguments{ convertFormattingValue(args)... };
-					formatted = std::apply([&msg](const auto &...converted) {
+					std::tuple<decltype(convert_formatting_value(args))...> converted_arguments{ convert_formatting_value(args)... };
+					return std::apply([&msg](const auto &...converted) {
 						return fmt::vformat(fmt::wstring_view(msg), fmt::make_wformat_args(converted...));
-					}, convertedArguments);
-				} catch (const std::exception &e) {
+					}, converted_arguments);
+				} catch (const std::exception &exception) {
 					// Append error message if formatting fails.
-					formatted = msg + L"\xa78\xa7o (" + toWString(e.what()) + L')';
+					const char *exception_type = typeid(exception).name();
+#ifdef _WIN32
+					// Skip the "class " prefix in MSVC ABI type names.
+					exception_type = exception_type + 6;
+#endif
+					return msg + L"\xa78\xa7o (" + to_wstring(fmt::format("{}: {}", exception_type, exception.what())) + L')';
 				}
 			}
-
-			return formatted;
 		}
 	};
 
 private:
-	// Logger name as wide string.
-	std::wstring name{};
+	// Logger name shared with queued tasks so that submitting a message does not copy it.
+	std::shared_ptr<const std::wstring> m_name;
 
 	// Logger descriptions cached for the public reference-returning accessors.
-	std::wstring as_wstring{};
-	std::string as_string{};
+	std::wstring m_as_wstring{};
+	std::string m_as_string{};
 
-	// Code to execute before and after this logger's output, copied into each submitted log task.
-	using BeforeLogCallback = std::function<void()>;
-	using AfterLogCallback = std::function<void(const std::wstring &, const std::wstring &)>;
-	mutable std::shared_ptr<const BeforeLogCallback> beforeLog;
-	mutable std::shared_ptr<const AfterLogCallback> afterLog;
-
-	void submitLog(std::wstring message, const LogStyle &style) const;
+	// Code to execute before and after this logger's output.
+	mutable std::atomic<std::shared_ptr<const std::function<void()>>> m_before_log_callback{};
+	mutable std::atomic<std::shared_ptr<const std::function<void(const std::wstring &, const std::wstring &)>>> m_after_log_callback{};
 
 	// Submit a log output task to the logging thread.
+	void submit_log(std::wstring message, const LogStyle &style) const;
+
+	// Format and enqueue a message when its severity passes the runtime filter, so that filtered messages never pay for formatting.
 	template<typename MessageType, typename... Args>
-	void log(const MessageType &message, const LogStyle &style, const Args &...args) const {
-		submitLog(StringConverter::formatMessage(message, args...), style);
+	void submit_log(const LogLevel level, const LogStyle &style, const MessageType &message, const Args &...args) const {
+		if (level < log_level()) return;
+		submit_log(StringConverter::format_message(message, args...), style);
 	}
 
 public:
@@ -167,44 +153,43 @@ public:
 	// Retrieve logger name as std::wstring.
 	[[nodiscard]] const std::wstring &wstring() const noexcept;
 
+	// Log a DEBUG-level message.
+	template<typename MessageType, typename... Args>
+	void debug(const MessageType &message, const Args &...args) const { submit_log(LogLevel::Debug, DEBUG_STYLE, message, args...); }
+
 	// Log an INFO-level message.
 	template<typename MessageType, typename... Args>
-	void info(const MessageType &message, const Args &...args) const {
-		log(message, INFO_STYLE, args...);
-	}
+	void info(const MessageType &message, const Args &...args) const { submit_log(LogLevel::Info, INFO_STYLE, message, args...); }
 
-	// Log an WARN-level message.
+	// Log a WARN-level message.
 	template<typename MessageType, typename... Args>
-	void warn(const MessageType &message, const Args &...args) const {
-		log(message, WARN_STYLE, args...);
-	}
+	void warn(const MessageType &message, const Args &...args) const { submit_log(LogLevel::Warn, WARN_STYLE, message, args...); }
 
 	// Log an ERROR-level message.
 	template<typename MessageType, typename... Args>
-	void error(const MessageType &message, const Args &...args) const {
-		log(message, ERROR_STYLE, args...);
-	}
+	void error(const MessageType &message, const Args &...args) const { submit_log(LogLevel::Error, ERROR_STYLE, message, args...); }
 
-	// Log an FATAL-level message.
+	// Log a FATAL-level message.
 	template<typename MessageType, typename... Args>
-	void fatal(const MessageType &message, const Args &...args) const {
-		log(message, FATAL_STYLE, args...);
-	}
+	void fatal(const MessageType &message, const Args &...args) const { submit_log(LogLevel::Fatal, FATAL_STYLE, message, args...); }
 
 	// Check if all pending log tasks have been processed.
-	static bool finishedTasks();
+	static bool is_finished_tasks();
 
 	// Block the current thread until all log output is completed.
 	static void wait();
 
+	// Set the minimum severity emitted by every logger instance; defaults to Info.
+	static void set_log_level(LogLevel level) noexcept;
+
+	// Retrieve the minimum severity currently emitted by every logger instance.
+	[[nodiscard]] static LogLevel log_level() noexcept;
+
 	// Register a callback function to execute after each log output from this logger.
-	// The callback receives two parameters:
-	//   1. The original log message (may include formatting codes).
-	//   2. The plain text version of the message (with formatting removed).
-	void setAfterLog(const std::function<void(const std::wstring &, const std::wstring &)> &func) const;
+	void set_after_log_callback(const std::function<void(const std::wstring &, const std::wstring &)> &func) const;
 
 	// Register a callback function to execute before each log output from this logger.
-	void setBeforeLog(const std::function<void()> &func) const;
+	void set_before_log_callback(const std::function<void()> &func) const;
 };
 
 #endif
