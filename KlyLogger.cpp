@@ -197,6 +197,19 @@ namespace {
 
 	// Platform-specific console handling.
 	class Console {
+		// Terminal and ANSI capability flags.
+		bool m_is_atty;
+		bool m_ansi_supported;
+		// Cache complete ANSI lines to reduce console output frequency.
+		std::wstring m_line_buffer;
+		// Cached HH:MM:SS timestamp, rebuilt at most once per second.
+		std::time_t m_last_time{};
+		std::wstring m_last_timestamp;
+#ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
+		// Plain, color-free text accumulated for the current line and written to the file once per line.
+		std::string m_file_line_buffer;
+#endif
+
 	public:
 		// Detect terminal output and initialize ANSI escape-sequence support.
 		Console() : m_is_atty(isatty(fileno(stderr)) != 0), m_ansi_supported(initialize_ansi()) { m_line_buffer.reserve(256); }
@@ -405,23 +418,23 @@ namespace {
 #endif
 		}
 #endif
-
-		// Terminal and ANSI capability flags.
-		bool m_is_atty;
-		bool m_ansi_supported;
-		// Cache complete ANSI lines to reduce console output frequency.
-		std::wstring m_line_buffer;
-		// Cached HH:MM:SS timestamp, rebuilt at most once per second.
-		std::time_t m_last_time{};
-		std::wstring m_last_timestamp;
-#ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
-		// Plain, color-free text accumulated for the current line and written to the file once per line.
-		std::string m_file_line_buffer;
-#endif
 	};
 
 	// Thread-safe runtime that owns the log queue and background logging thread. A mutex and condition variables replace the old spin lock.
 	class Runtime {
+		// Queue lock and worker wake/completion signals.
+		mutable std::mutex m_mutex;
+		std::condition_variable m_work_available;
+		std::condition_variable m_finished;
+		// Log task queue processed by the background thread.
+		std::queue<LogTask> m_queue;
+		// Worker state used by finished() and orderly shutdown.
+		bool m_processing{};
+		bool m_stopping{};
+		// Console/file output backend and its worker thread.
+		Console m_console;
+		std::thread m_worker;
+
 	public:
 		// Run an operation under the runtime lock and return its result.
 		template<typename Function>
@@ -556,19 +569,6 @@ namespace {
 			// Set the final color for the actual log message.
 			m_console.set_color(style->text_color_win, style->text_color);
 		}
-
-		// Queue lock and worker wake/completion signals.
-		mutable std::mutex m_mutex;
-		std::condition_variable m_work_available;
-		std::condition_variable m_finished;
-		// Log task queue processed by the background thread.
-		std::queue<LogTask> m_queue;
-		// Worker state used by finished() and orderly shutdown.
-		bool m_processing{};
-		bool m_stopping{};
-		// Console/file output backend and its worker thread.
-		Console m_console;
-		std::thread m_worker;
 	};
 
 	// Lazily create one process-wide logging runtime.
