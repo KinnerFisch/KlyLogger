@@ -39,17 +39,11 @@
 // KlyLogger: A lightweight, color console and file logging library for C++.
 class KlyLogger {
 	// Type traits for string conversion.
-	template<typename T, typename = void>
-	struct has_string : std::false_type {};
+	template<typename T>
+	static constexpr bool has_string = requires(const T &value) { value.string(); };
 
 	template<typename T>
-	struct has_string<T, std::void_t<decltype(std::declval<T>().string())>> : std::true_type {};
-
-	template<typename T, typename = void>
-	struct has_wstring : std::false_type {};
-
-	template<typename T>
-	struct has_wstring<T, std::void_t<decltype(std::declval<T>().wstring())>> : std::true_type {};
+	static constexpr bool has_wstring = requires(const T &value) { value.wstring(); };
 
 public:
 	// Severity levels used for runtime filtering; a message is dropped when its level is below the minimum selected by KlyLogger::set_log_level.
@@ -76,9 +70,9 @@ public:
 		template<typename T>
 		static decltype(auto) convert_formatting_value(const T &arg) {
 			if constexpr (std::is_same_v<T, std::nullptr_t>) return L"nullptr";
-			else if constexpr (std::is_same_v<T, std::string> || std::is_convertible_v<T, const char *>) return to_wstring(arg);
-			else if constexpr (has_wstring<T>::value) return std::wstring(arg.wstring());
-			else if constexpr (has_string<T>::value) return to_wstring(arg.string());
+			else if constexpr (std::is_convertible_v<T, std::string_view>) return to_wstring(arg);
+			else if constexpr (has_wstring<T>) return arg.wstring();
+			else if constexpr (has_string<T>) return to_wstring(arg.string());
 			else return arg;
 		}
 
@@ -86,8 +80,11 @@ public:
 		template<typename MessageType, typename... Args>
 		static std::wstring format_message(const MessageType &message, const Args &...args) {
 			// Without arguments the converted message is already the final result, so return it directly and skip the extra copy the formatted buffer would otherwise make.
-			if constexpr (sizeof...(args) == 0) return convert_formatting_value(message);
-			else {
+			if constexpr (sizeof...(args) == 0) {
+				if constexpr (auto &&value = convert_formatting_value(message); std::is_constructible_v<std::wstring, decltype(value)>)
+					return std::wstring(std::forward<decltype(value)>(value));
+				else return fmt::format(L"{}", value);
+			} else {
 				// Convert message to wide string format.
 				const std::wstring msg = convert_formatting_value(message);
 				try {
@@ -112,7 +109,6 @@ public:
 private:
 	// Logger name shared with queued tasks so that submitting a message does not copy it.
 	std::shared_ptr<const std::wstring> m_name;
-
 	// Logger descriptions cached for the public reference-returning accessors.
 	std::wstring m_as_wstring{};
 	std::string m_as_string{};
@@ -134,41 +130,32 @@ private:
 public:
 	// Construct a logger with no name.
 	KlyLogger();
-
 	// Construct a logger with a std::wstring name.
 	KlyLogger(const std::wstring &name);
-
 	// Construct a logger with a std::string name.
 	KlyLogger(const std::string &name);
-
 	// Copy callbacks while synchronized with callback registration.
 	KlyLogger(const KlyLogger &logger);
-
 	// Move callbacks while synchronized with callback registration.
 	KlyLogger(KlyLogger &&logger) noexcept;
 
 	// Retrieve logger name as std::string.
 	[[nodiscard]] const std::string &string() const noexcept;
-
 	// Retrieve logger name as std::wstring.
 	[[nodiscard]] const std::wstring &wstring() const noexcept;
 
 	// Log a DEBUG-level message.
 	template<typename MessageType, typename... Args>
 	void debug(const MessageType &message, const Args &...args) const { submit_log(LogLevel::Debug, DEBUG_STYLE, message, args...); }
-
 	// Log an INFO-level message.
 	template<typename MessageType, typename... Args>
 	void info(const MessageType &message, const Args &...args) const { submit_log(LogLevel::Info, INFO_STYLE, message, args...); }
-
 	// Log a WARN-level message.
 	template<typename MessageType, typename... Args>
 	void warn(const MessageType &message, const Args &...args) const { submit_log(LogLevel::Warn, WARN_STYLE, message, args...); }
-
 	// Log an ERROR-level message.
 	template<typename MessageType, typename... Args>
 	void error(const MessageType &message, const Args &...args) const { submit_log(LogLevel::Error, ERROR_STYLE, message, args...); }
-
 	// Log a FATAL-level message.
 	template<typename MessageType, typename... Args>
 	void fatal(const MessageType &message, const Args &...args) const { submit_log(LogLevel::Fatal, FATAL_STYLE, message, args...); }
@@ -181,15 +168,18 @@ public:
 
 	// Set the minimum severity emitted by every logger instance; defaults to Info.
 	static void set_log_level(LogLevel level) noexcept;
-
 	// Retrieve the minimum severity currently emitted by every logger instance.
 	[[nodiscard]] static LogLevel log_level() noexcept;
 
 	// Register a callback function to execute after each log output from this logger.
 	void set_after_log_callback(const std::function<void(const std::wstring &, const std::wstring &)> &func) const;
-
 	// Register a callback function to execute before each log output from this logger.
 	void set_before_log_callback(const std::function<void()> &func) const;
+
+	// Register a callback function to execute after each log output from every logger instance.
+	static void set_global_after_log_callback(const std::function<void(const std::wstring &, const std::wstring &)> &func);
+	// Register a callback function to execute before each log output from every logger instance.
+	static void set_global_before_log_callback(const std::function<void()> &func);
 };
 
 #endif

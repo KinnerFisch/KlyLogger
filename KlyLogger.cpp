@@ -55,6 +55,10 @@ const KlyLogger::LogStyle KlyLogger::ERROR_STYLE{ "ERROR", "\33[0;31m", "\33[0;9
 const KlyLogger::LogStyle KlyLogger::FATAL_STYLE{ "FATAL", "\33[2;31m", "\33[0;31m", 32772, 4 };
 
 namespace {
+	// Code to execute before and after output from every logger instance.
+	std::atomic<std::shared_ptr<const std::function<void()>>> g_before_log_callback{};
+	std::atomic<std::shared_ptr<const std::function<void(const std::wstring &, const std::wstring &)>>> g_after_log_callback{};
+
 	// Log task containing logger name, log message, log style, and callbacks captured at submission.
 	struct LogTask {
 		std::shared_ptr<const std::wstring> name;
@@ -62,6 +66,8 @@ namespace {
 		const KlyLogger::LogStyle *style{};
 		std::shared_ptr<const std::function<void()>> before_log_callback;
 		std::shared_ptr<const std::function<void(const std::wstring &, const std::wstring &)>> after_log_callback;
+		std::shared_ptr<const std::function<void()>> g_before_log_callback;
+		std::shared_ptr<const std::function<void(const std::wstring &, const std::wstring &)>> g_after_log_callback;
 	};
 
 	// Retrieve the local time using the platform-safe conversion routine.
@@ -197,6 +203,19 @@ namespace {
 
 	// Platform-specific console handling.
 	class Console {
+		// Terminal and ANSI capability flags.
+		bool m_is_atty;
+		bool m_ansi_supported;
+		// Cache complete ANSI lines to reduce console output frequency.
+		std::wstring m_line_buffer;
+		// Cached HH:MM:SS timestamp, rebuilt at most once per second.
+		std::time_t m_last_time{};
+		std::wstring m_last_timestamp;
+#ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
+		// Plain, color-free text accumulated for the current line and written to the file once per line.
+		std::string m_file_line_buffer;
+#endif
+
 	public:
 		// Detect terminal output and initialize ANSI escape-sequence support.
 		Console() : m_is_atty(isatty(fileno(stderr)) != 0), m_ansi_supported(initialize_ansi()) { m_line_buffer.reserve(256); }
@@ -405,23 +424,23 @@ namespace {
 #endif
 		}
 #endif
-
-		// Terminal and ANSI capability flags.
-		bool m_is_atty;
-		bool m_ansi_supported;
-		// Cache complete ANSI lines to reduce console output frequency.
-		std::wstring m_line_buffer;
-		// Cached HH:MM:SS timestamp, rebuilt at most once per second.
-		std::time_t m_last_time{};
-		std::wstring m_last_timestamp;
-#ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
-		// Plain, color-free text accumulated for the current line and written to the file once per line.
-		std::string m_file_line_buffer;
-#endif
 	};
 
 	// Thread-safe runtime that owns the log queue and background logging thread. A mutex and condition variables replace the old spin lock.
 	class Runtime {
+		// Queue lock and worker wake/completion signals.
+		mutable std::mutex m_mutex;
+		std::condition_variable m_work_available;
+		std::condition_variable m_finished;
+		// Log task queue processed by the background thread.
+		std::queue<LogTask> m_queue;
+		// Worker state used by finished() and orderly shutdown.
+		bool m_processing{};
+		bool m_stopping{};
+		// Console/file output backend and its worker thread.
+		Console m_console;
+		std::thread m_worker;
+
 	public:
 		// Run an operation under the runtime lock and return its result.
 		template<typename Function>
@@ -445,7 +464,7 @@ namespace {
 		void submit(std::shared_ptr<const std::wstring> name, std::wstring message, const KlyLogger::LogStyle *style, const std::shared_ptr<const std::function<void()>> &before,
 					const std::shared_ptr<const std::function<void(const std::wstring &, const std::wstring &)>> &after) {
 			// Move the name and message, and copy the callback owners, before taking the lock so the critical section only performs the queue insertion.
-			LogTask task{ std::move(name), std::move(message), style, before, after };
+			LogTask task{ std::move(name), std::move(message), style, before, after, g_before_log_callback.load(), g_after_log_callback.load() };
 			call_with_lock([&] { m_queue.push(std::move(task)); });
 			m_work_available.notify_one();
 		}
@@ -484,6 +503,8 @@ namespace {
 				// Release user callbacks outside the runtime lock while the worker still counts as busy.
 				task.before_log_callback.reset();
 				task.after_log_callback.reset();
+				task.g_before_log_callback.reset();
+				task.g_after_log_callback.reset();
 
 				call_with_lock([this] {
 					m_processing = false;
@@ -508,9 +529,15 @@ namespace {
 		// Process one non-empty log line with callbacks and formatting.
 		void process_single_line(const LogTask &task, const std::wstring_view message) {
 			if (message.empty()) return;
-			if (task.before_log_callback) {
-				const auto before = *task.before_log_callback;
+			if (task.g_before_log_callback) {
 				try {
+					const auto before = *task.g_before_log_callback;
+					before();
+				} catch (...) {}
+			}
+			if (task.before_log_callback) {
+				try {
+					const auto before = *task.before_log_callback;
 					before();
 				} catch (...) {}
 			}
@@ -518,16 +545,25 @@ namespace {
 			FileLogger::update_if_needed();
 #endif
 			print_timestamp(*task.name, task.style);
-			const std::wstring stripped = m_console.process_color_codes(message, task.style->text_color_win, task.style->text_color, static_cast<bool>(task.after_log_callback));
+			const std::wstring stripped = m_console.process_color_codes(message, task.style->text_color_win, task.style->text_color,
+				static_cast<bool>(task.after_log_callback) || static_cast<bool>(task.g_after_log_callback));
 			m_console.clear_line();
 			m_console.flush_line();
-			if (task.after_log_callback) {
-				const auto after = *task.after_log_callback;
+			if (task.after_log_callback || task.g_after_log_callback) {
 				// Materialize the line only when a callback needs an owning string.
 				const std::wstring owned(message);
-				try {
-					after(owned, stripped);
-				} catch (...) {}
+				if (task.after_log_callback) {
+					try {
+						const auto after = *task.after_log_callback;
+						after(owned, stripped);
+					} catch (...) {}
+				}
+				if (task.g_after_log_callback) {
+					try {
+						const auto after = *task.g_after_log_callback;
+						after(owned, stripped);
+					} catch (...) {}
+				}
 			}
 		}
 
@@ -556,19 +592,6 @@ namespace {
 			// Set the final color for the actual log message.
 			m_console.set_color(style->text_color_win, style->text_color);
 		}
-
-		// Queue lock and worker wake/completion signals.
-		mutable std::mutex m_mutex;
-		std::condition_variable m_work_available;
-		std::condition_variable m_finished;
-		// Log task queue processed by the background thread.
-		std::queue<LogTask> m_queue;
-		// Worker state used by finished() and orderly shutdown.
-		bool m_processing{};
-		bool m_stopping{};
-		// Console/file output backend and its worker thread.
-		Console m_console;
-		std::thread m_worker;
 	};
 
 	// Lazily create one process-wide logging runtime.
@@ -740,8 +763,7 @@ void KlyLogger::set_log_level(const LogLevel level) noexcept { shared_log_level(
 // Retrieve the minimum severity currently emitted by every logger instance.
 KlyLogger::LogLevel KlyLogger::log_level() noexcept { return shared_log_level().load(std::memory_order_relaxed); }
 
-void KlyLogger::set_after_log_callback(
-	const std::function<void(const std::wstring &, const std::wstring &)> &func) const {
+void KlyLogger::set_after_log_callback(const std::function<void(const std::wstring &, const std::wstring &)> &func) const {
 	if (func) m_after_log_callback.store(std::make_shared<const std::function<void(const std::wstring &, const std::wstring &)>>(func));
 	else m_after_log_callback.store(nullptr);
 }
@@ -749,6 +771,16 @@ void KlyLogger::set_after_log_callback(
 void KlyLogger::set_before_log_callback(const std::function<void()> &func) const {
 	if (func) m_before_log_callback.store(std::make_shared<const std::function<void()>>(func));
 	else m_before_log_callback.store(nullptr);
+}
+
+void KlyLogger::set_global_after_log_callback(const std::function<void(const std::wstring &, const std::wstring &)> &func) {
+	if (func) g_after_log_callback.store(std::make_shared<const std::function<void(const std::wstring &, const std::wstring &)>>(func));
+	else g_after_log_callback.store(nullptr);
+}
+
+void KlyLogger::set_global_before_log_callback(const std::function<void()> &func) {
+	if (func) g_before_log_callback.store(std::make_shared<const std::function<void()>>(func));
+	else g_before_log_callback.store(nullptr);
 }
 
 // Convert the tagged C argument array into fmt's runtime argument store, then format the complete string in one pass.
@@ -948,6 +980,24 @@ void kly_logger_set_after_log_callback(const KlyLoggerHandle logger, const KlyLo
 		return;
 	}
 	logger->logger.set_after_log_callback([callback](const std::wstring &original, const std::wstring &plain) {
+		callback(original.c_str(), plain.c_str());
+	});
+}
+
+void kly_logger_set_global_before_log_callback(const KlyLoggerBeforeLogCallback callback) {
+	if (!callback) {
+		KlyLogger::set_global_before_log_callback({});
+		return;
+	}
+	KlyLogger::set_global_before_log_callback(callback);
+}
+
+void kly_logger_set_global_after_log_callback(const KlyLoggerAfterLogCallback callback) {
+	if (!callback) {
+		KlyLogger::set_global_after_log_callback({});
+		return;
+	}
+	KlyLogger::set_global_after_log_callback([callback](const std::wstring &original, const std::wstring &plain) {
 		callback(original.c_str(), plain.c_str());
 	});
 }

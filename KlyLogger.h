@@ -260,6 +260,9 @@ void kly_logger_wait();
 // Register callbacks that run before or after each output line. Pass NULL to clear the corresponding callback.
 void kly_logger_set_before_log_callback(KlyLoggerHandle logger, KlyLoggerBeforeLogCallback callback);
 void kly_logger_set_after_log_callback(KlyLoggerHandle logger, KlyLoggerAfterLogCallback callback);
+// Register callbacks that run before or after each output line from every logger. Pass NULL to clear the corresponding callback.
+void kly_logger_set_global_before_log_callback(KlyLoggerBeforeLogCallback callback);
+void kly_logger_set_global_after_log_callback(KlyLoggerAfterLogCallback callback);
 // Set the process-wide minimum severity emitted by every logger. Defaults to KLY_LOGGER_LOG_LEVEL_INFO.
 void kly_logger_set_log_level(KlyLoggerLogLevel level);
 // Retrieve the process-wide minimum severity currently in effect.

@@ -199,7 +199,7 @@ The filter is process-wide and shared by every logger object. Calls below it are
 
 ```cpp
 logger.set_before_log_callback([]() {
-    // Runs before each output line / 每行输出前调用
+    // Runs before each output line from specific logger / 特定日志器的每行输出前调用
 });
 
 logger.set_after_log_callback([](const std::wstring &original, const std::wstring &plain) {
@@ -207,14 +207,26 @@ logger.set_after_log_callback([](const std::wstring &original, const std::wstrin
     // plain:    the message with color codes removed / 去掉颜色代码的纯文本消息
 });
 
+KlyLogger::set_global_before_log_callback([]() {
+    // Runs before each output line from every logger / 所有日志器的每行输出前调用
+});
+
+KlyLogger::set_global_after_log_callback([](const std::wstring &original, const std::wstring &plain) {
+    // Same arguments as the instance callback / 参数与实例回调相同
+});
+
 logger.set_before_log_callback({});        // clear / 清除
 logger.set_after_log_callback(nullptr);    // clear / 清除
+KlyLogger::set_global_before_log_callback({});     // clear / 清除
+KlyLogger::set_global_after_log_callback(nullptr); // clear / 清除
 ```
 
-- Callbacks are per logger instance and are snapshotted when a message is submitted, so a change affects later messages only.
-- 回调是按日志器实例保存的，并在提交消息时进行快照，因此修改只影响之后的消息。
-- They are invoked on the background logging thread, and exceptions thrown from them are swallowed.
-- 它们在后台日志线程上被调用，回调中抛出的异常会被忽略。
+- Instance callbacks apply to one logger; global callbacks apply to every logger. Both are snapshotted when a message is submitted, so a change affects later messages only. Pass an empty function or `nullptr` to clear either kind.
+- 实例回调只作用于一个日志器，全局回调作用于所有日志器。两者都在提交消息时进行快照，因此修改只影响之后的消息。传入空函数或 `nullptr` 可清除任一种回调。
+- Each non-empty output line runs in this order: `global_before -> instance_before -> log -> instance_after -> global_after`.
+- 每个非空输出行按以下顺序执行：`global_before -> instance_before -> log -> instance_after -> global_after`。
+- Callbacks are invoked on the background logging thread, each in its own try-catch block. Exceptions are swallowed without skipping the output or remaining callbacks.
+- 回调在后台日志线程上调用，每个回调都有独立的 try-catch。异常会被忽略，不会跳过日志输出或后续回调。
 - Calling `KlyLogger::wait()` inside a callback is a no-op, because the calling thread is the writer itself.
 - 在回调里调用 `KlyLogger::wait()` 是空操作，因为调用线程本身就是写出线程。
 
@@ -353,12 +365,21 @@ kly_logger_set_after_log_callback(logger, on_after);
 kly_logger_set_before_log_callback(logger, NULL); // clear / 清除
 kly_logger_set_after_log_callback(logger, NULL);  // clear / 清除
 
+kly_logger_set_global_before_log_callback(on_before);
+kly_logger_set_global_after_log_callback(on_after);
+kly_logger_set_global_before_log_callback(NULL); // clear / 清除
+kly_logger_set_global_after_log_callback(NULL);  // clear / 清除
+
 kly_logger_set_log_level(KLY_LOGGER_LOG_LEVEL_DEBUG);
 KlyLoggerLogLevel level = kly_logger_log_level();
 
 kly_logger_wait();                        // drain queued output / 等待队列写出
 int idle = kly_logger_finished_tasks();   // nonzero when idle / 空闲时非零
 ```
+
+Global callbacks use the same callback types as instance callbacks, without a logger handle. Snapshot timing, per-line execution order, and exception handling are the same as in C++.
+
+全局回调使用与实例回调相同的回调类型，无需传入日志器句柄。快照时机、逐行执行顺序和异常处理方式与 C++ 相同。
 
 `KlyLoggerLogLevel` values are `KLY_LOGGER_LOG_LEVEL_DEBUG`, `KLY_LOGGER_LOG_LEVEL__INFO`, `KLY_LOGGER_LOG_LEVEL__WARN`, `KLY_LOGGER_LOG_LEVEL__ERROR` and `KLY_LOGGER_LOG_LEVEL__FATAL`, ordered from least to most severe and numerically identical to their C++ counterparts.
 
