@@ -199,20 +199,20 @@ The filter is process-wide and shared by every logger object. Calls below it are
 
 ```cpp
 logger.set_before_log_callback([]() {
-    // Runs before each output line from specific logger / 特定日志器的每行输出前调用
+	// Runs before each output line from specific logger / 特定日志器的每行输出前调用
 });
 
 logger.set_after_log_callback([](const std::wstring &original, const std::wstring &plain) {
-    // original: raw message including color codes / 原始消息（含颜色代码）
-    // plain:    the message with color codes removed / 去掉颜色代码的纯文本消息
+	// original: raw message including color codes / 原始消息（含颜色代码）
+	// plain:    the message with color codes removed / 去掉颜色代码的纯文本消息
 });
 
 KlyLogger::set_global_before_log_callback([]() {
-    // Runs before each output line from every logger / 所有日志器的每行输出前调用
+	// Runs before each output line from every logger / 所有日志器的每行输出前调用
 });
 
 KlyLogger::set_global_after_log_callback([](const std::wstring &original, const std::wstring &plain) {
-    // Same arguments as the instance callback / 参数与实例回调相同
+	// Same arguments as the instance callback / 参数与实例回调相同
 });
 
 logger.set_before_log_callback({});        // clear / 清除
@@ -263,8 +263,8 @@ std::wstring text = KlyLogger::StringConverter::format_message(L"{} of {}", 1, 2
 
 ```cpp
 struct LogStyle {
-    std::string level, level_color, text_color;   // level name, ANSI level/text colors
-    uint16_t level_color_win, text_color_win;     // legacy Windows console attributes
+	std::string level, level_color, text_color;   // level name, ANSI level/text colors
+	uint16_t level_color_win, text_color_win;     // legacy Windows console attributes
 };
 
 KlyLogger::DEBUG_STYLE; KlyLogger::INFO_STYLE; KlyLogger::WARN_STYLE;
@@ -455,7 +455,6 @@ Color codes are interpreted only when standard error is a terminal. When output 
 ```sh
 git clone --recursive https://github.com/KinnerFisch/KlyLogger
 cd KlyLogger
-mkdir build
 cmake -S . -B build
 cmake --build build --config Release
 ```
@@ -492,10 +491,10 @@ Linux 下同时支持 GCC 和 Clang，均使用标准的 `-flto` 流程。
 ```cmake
 add_subdirectory(path/to/KlyLogger)
 if(MSVC OR (CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND CMAKE_CXX_SIMULATE_ID STREQUAL "MSVC"))
-    target_link_libraries(your_target PRIVATE KlyLogger::KlyLogger_MD) # /MD
-    # target_link_libraries(your_target PRIVATE KlyLogger::KlyLogger_MT) # /MT
+	target_link_libraries(your_target PRIVATE KlyLogger::KlyLogger_MD) # /MD
+	# target_link_libraries(your_target PRIVATE KlyLogger::KlyLogger_MT) # /MT
 else()
-    target_link_libraries(your_target PRIVATE KlyLogger::KlyLogger)
+	target_link_libraries(your_target PRIVATE KlyLogger::KlyLogger)
 endif()
 ```
 
