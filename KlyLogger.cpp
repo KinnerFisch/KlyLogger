@@ -48,11 +48,11 @@
 #endif
 
 // Visual and textual attributes for each log level, including Windows console colors and ANSI escape sequences.
-const KlyLogger::LogStyle KlyLogger::DEBUG_STYLE{ "DEBUG", "\33[0;37m", "\33[0;2m", 7, 8 };
-const KlyLogger::LogStyle KlyLogger::INFO_STYLE{ "INFO", "\33[0;92m", "\33[0;37m", 10, 7 };
-const KlyLogger::LogStyle KlyLogger::WARN_STYLE{ "WARN", "\33[0;33m", "\33[0;93m", 6, 14 };
-const KlyLogger::LogStyle KlyLogger::ERROR_STYLE{ "ERROR", "\33[0;31m", "\33[0;91m", 4, 12 };
-const KlyLogger::LogStyle KlyLogger::FATAL_STYLE{ "FATAL", "\33[2;31m", "\33[0;31m", 32772, 4 };
+constexpr KlyLogger::LogStyle KlyLogger::DEBUG_STYLE{ "DEBUG", "\33[0;37m", "\33[0;2m", 7, 8 };
+constexpr KlyLogger::LogStyle KlyLogger::INFO_STYLE{ "INFO", "\33[0;92m", "\33[0;37m", 10, 7 };
+constexpr KlyLogger::LogStyle KlyLogger::WARN_STYLE{ "WARN", "\33[0;33m", "\33[0;93m", 6, 14 };
+constexpr KlyLogger::LogStyle KlyLogger::ERROR_STYLE{ "ERROR", "\33[0;31m", "\33[0;91m", 4, 12 };
+constexpr KlyLogger::LogStyle KlyLogger::FATAL_STYLE{ "FATAL", "\33[2;31m", "\33[0;31m", 32772, 4 };
 
 namespace {
 	// Code to execute before and after output from every logger instance.

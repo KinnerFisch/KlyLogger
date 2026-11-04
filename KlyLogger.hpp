@@ -51,7 +51,7 @@ public:
 
 	// LogStyle encapsulates all visual and textual attributes for a log level, including level name, Windows console colors, and ANSI escape sequences.
 	struct LogStyle {
-		std::string level, level_color, text_color;
+		std::string_view level, level_color, text_color;
 		uint16_t level_color_win, text_color_win;
 	};
 

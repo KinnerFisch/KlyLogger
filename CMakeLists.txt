@@ -37,12 +37,15 @@ endif()
 # Build configuration
 #
 # Static archives are always produced with an optimized configuration.
-# Multi-config generators are restricted to Release; single-config generators are forced to Release so a Debug invocation cannot silently produce an unoptimized archive.
+# Standalone builds use Release only. As a subdirectory, preserve the host's configurations;
+# optimization remains target-local and Debug builds use the matching debug runtime.
 # ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-if(CMAKE_CONFIGURATION_TYPES)
-	set(CMAKE_CONFIGURATION_TYPES Release CACHE STRING "Available build configurations" FORCE)
-else()
-	set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
+	if(CMAKE_CONFIGURATION_TYPES)
+		set(CMAKE_CONFIGURATION_TYPES Release CACHE STRING "Available build configurations" FORCE)
+	else()
+		set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+	endif()
 endif()
 
 # ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -67,14 +70,21 @@ if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/fmt/include/fmt/format.h")
 endif()
 
 # ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-# Remove CMake's default MSVC Release optimization flags so the explicit optimization options below do not merely override them and do not emit D9025 override warnings.
-# clang-cl inherits the same CMAKE_CXX_FLAGS_RELEASE.
+# Remove conflicting MSVC optimization/runtime-check flags in this directory only.
+# Never rewrite the host's cache. /RTC is incompatible with the optimized /GL targets.
+# clang-cl inherits the same configuration flags.
 # ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 if(KLY_LOGGER_IS_MSVC OR KLY_LOGGER_IS_CLANG_CL)
-	foreach(flag_var CMAKE_CXX_FLAGS_RELEASE CMAKE_C_FLAGS_RELEASE)
-		string(REGEX REPLACE "(^| )[/-]O2( |$)" " " ${flag_var} "${${flag_var}}")
-		string(REGEX REPLACE "(^| )[/-]Ob2( |$)" " " ${flag_var} "${${flag_var}}")
-		set(${flag_var} "${${flag_var}}" CACHE STRING "Release compiler flags" FORCE)
+	set(kly_logger_configurations ${CMAKE_CONFIGURATION_TYPES} ${CMAKE_BUILD_TYPE} Debug Release RelWithDebInfo MinSizeRel)
+	set(kly_logger_flag_vars CMAKE_CXX_FLAGS)
+	foreach(configuration IN LISTS kly_logger_configurations)
+		string(TOUPPER "${configuration}" configuration_upper)
+		list(APPEND kly_logger_flag_vars CMAKE_CXX_FLAGS_${configuration_upper})
+	endforeach()
+	foreach(flag_var IN LISTS kly_logger_flag_vars)
+		string(REGEX REPLACE "(^| )[/-]O[012d]( |$)" " " ${flag_var} "${${flag_var}}")
+		string(REGEX REPLACE "(^| )[/-]Ob[0123]( |$)" " " ${flag_var} "${${flag_var}}")
+		string(REGEX REPLACE "(^| )[/-]RTC[1csu]+( |$)" " " ${flag_var} "${${flag_var}}")
 	endforeach()
 endif()
 
@@ -213,9 +223,9 @@ if(KLY_LOGGER_IS_MSVC OR KLY_LOGGER_IS_CLANG_CL)
 	set(KLY_LOGGER_TARGETS)
 	foreach(runtime IN ITEMS MD MT)
 		if(runtime STREQUAL MD)
-			set(runtime_library MultiThreadedDLL)
+			set(runtime_library "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
 		else()
-			set(runtime_library MultiThreaded)
+			set(runtime_library "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 		endif()
 
 		kly_logger_add_variant(KlyLogger_${runtime} KlyLogger_${runtime} FALSE FALSE ${runtime_library})

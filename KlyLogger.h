@@ -99,61 +99,61 @@ typedef struct KlyLoggerFormatArg {
 } KlyLoggerFormatArg;
 
 KLY_LOGGER_DETAIL_INLINE KlyLoggerFormatArg kly_logger_arg_signed(const int64_t value) {
-	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_SIGNED_INTEGER, {} };
+	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_SIGNED_INTEGER, { 0 } };
 	result.value.signed_integer = value;
 	return result;
 }
 
 KLY_LOGGER_DETAIL_INLINE KlyLoggerFormatArg kly_logger_arg_unsigned(const uint64_t value) {
-	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_UNSIGNED_INTEGER, {} };
+	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_UNSIGNED_INTEGER, { 0 } };
 	result.value.unsigned_integer = value;
 	return result;
 }
 
 KLY_LOGGER_DETAIL_INLINE KlyLoggerFormatArg kly_logger_arg_double(const double value) {
-	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_FLOATING_POINT, {} };
+	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_FLOATING_POINT, { 0 } };
 	result.value.floating_point = value;
 	return result;
 }
 
 KLY_LOGGER_DETAIL_INLINE KlyLoggerFormatArg kly_logger_arg_long_double(const long double value) {
-	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_LONG_DOUBLE, {} };
+	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_LONG_DOUBLE, { 0 } };
 	result.value.long_double_value = value;
 	return result;
 }
 
 KLY_LOGGER_DETAIL_INLINE KlyLoggerFormatArg kly_logger_arg_bool(const bool value) {
-	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_BOOLEAN, {} };
+	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_BOOLEAN, { 0 } };
 	result.value.boolean = value;
 	return result;
 }
 
 KLY_LOGGER_DETAIL_INLINE KlyLoggerFormatArg kly_logger_arg_char(const char value) {
-	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_CHARACTER, {} };
+	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_CHARACTER, { 0 } };
 	result.value.character = value;
 	return result;
 }
 
 KLY_LOGGER_DETAIL_INLINE KlyLoggerFormatArg kly_logger_arg_wchar(const wchar_t value) {
-	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_WIDE_CHARACTER, {} };
+	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_WIDE_CHARACTER, { 0 } };
 	result.value.wide_character = value;
 	return result;
 }
 
 KLY_LOGGER_DETAIL_INLINE KlyLoggerFormatArg kly_logger_arg_string(const char *value) {
-	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_STRING, {} };
+	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_STRING, { 0 } };
 	result.value.string = value;
 	return result;
 }
 
 KLY_LOGGER_DETAIL_INLINE KlyLoggerFormatArg kly_logger_arg_wstring(const wchar_t *value) {
-	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_WIDE_STRING, {} };
+	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_WIDE_STRING, { 0 } };
 	result.value.wide_string = value;
 	return result;
 }
 
 KLY_LOGGER_DETAIL_INLINE KlyLoggerFormatArg kly_logger_arg_pointer(const void *value) {
-	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_POINTER, {} };
+	KlyLoggerFormatArg result = { KLY_LOGGER_FORMAT_POINTER, { 0 } };
 	result.value.pointer = value;
 	return result;
 }

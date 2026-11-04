@@ -263,8 +263,8 @@ std::wstring text = KlyLogger::StringConverter::format_message(L"{} of {}", 1, 2
 
 ```cpp
 struct LogStyle {
-	std::string level, level_color, text_color;   // level name, ANSI level/text colors
-	uint16_t level_color_win, text_color_win;     // legacy Windows console attributes
+	std::string_view level, level_color, text_color; // level name, ANSI level/text colors
+	uint16_t level_color_win, text_color_win;        // legacy Windows console attributes
 };
 
 KlyLogger::DEBUG_STYLE; KlyLogger::INFO_STYLE; KlyLogger::WARN_STYLE;
@@ -381,9 +381,9 @@ Global callbacks use the same callback types as instance callbacks, without a lo
 
 全局回调使用与实例回调相同的回调类型，无需传入日志器句柄。快照时机、逐行执行顺序和异常处理方式与 C++ 相同。
 
-`KlyLoggerLogLevel` values are `KLY_LOGGER_LOG_LEVEL_DEBUG`, `KLY_LOGGER_LOG_LEVEL__INFO`, `KLY_LOGGER_LOG_LEVEL__WARN`, `KLY_LOGGER_LOG_LEVEL__ERROR` and `KLY_LOGGER_LOG_LEVEL__FATAL`, ordered from least to most severe and numerically identical to their C++ counterparts.
+`KlyLoggerLogLevel` values are `KLY_LOGGER_LOG_LEVEL_DEBUG`, `KLY_LOGGER_LOG_LEVEL_INFO`, `KLY_LOGGER_LOG_LEVEL_WARN`, `KLY_LOGGER_LOG_LEVEL_ERROR` and `KLY_LOGGER_LOG_LEVEL_FATAL`, ordered from least to most severe and numerically identical to their C++ counterparts.
 
-`KlyLoggerLogLevel` 的取值为 `KLY_LOGGER_LOG_LEVEL_DEBUG`、`KLY_LOGGER_LOG_LEVEL__INFO`、`KLY_LOGGER_LOG_LEVEL__WARN`、`KLY_LOGGER_LOG_LEVEL__ERROR`、`KLY_LOGGER_LOG_LEVEL__FATAL`，由低到高排列，且数值与 C++ 对应值一致。
+`KlyLoggerLogLevel` 的取值为 `KLY_LOGGER_LOG_LEVEL_DEBUG`、`KLY_LOGGER_LOG_LEVEL_INFO`、`KLY_LOGGER_LOG_LEVEL_WARN`、`KLY_LOGGER_LOG_LEVEL_ERROR`、`KLY_LOGGER_LOG_LEVEL_FATAL`，由低到高排列，且数值与 C++ 对应值一致。
 
 The `kly_logger_detail_*_args` functions are internal bridges used by the convenience macros; applications should call `kly_logger_debug`/`kly_logger_info`/`kly_logger_warn`/`kly_logger_error`/`kly_logger_fatal` instead.
 
@@ -410,8 +410,8 @@ Formatting codes / 样式代码：
 
 | Code | Emitted / 发出的序列 | Effect / 效果 |
 |---|---|---|
-| `§k` | `ESC[5m` | Blink; a terminal cannot obfuscate text the way Minecraft does / 闪烁；终端无法像 MC 那样真正混淆文字 |
-| `§l` | `ESC[21m` | Bold / 加粗 |
+| `§k` | `ESC[6m` | Blink; a terminal cannot obfuscate text the way Minecraft does / 闪烁；终端无法像 MC 那样真正混淆文字 |
+| `§l` | `ESC[1m` | Bold / 加粗 |
 | `§m` | `ESC[9m` | Strikethrough / 删除线 |
 | `§n` | `ESC[4m` | Underline / 下划线 |
 | `§o` | `ESC[3m` | Italic / 斜体 |
@@ -464,6 +464,10 @@ On Windows, select the target whose suffix matches the application's runtime lib
 
 使用 CMake 时直接链接所选目标。
 Windows 下请选择后缀与应用程序运行库 (`/MD` 或 `/MT`) 匹配的目标。
+
+Standalone builds use Release only. When included with `add_subdirectory`, KlyLogger preserves the host project's build configurations and compiler flags. Its targets remain optimized; in Debug configurations the MD/MT targets use `/MDd`/`/MTd` respectively to match the application's debug runtime and STL ABI.
+
+独立构建仅使用 Release。通过 `add_subdirectory` 引入时，KlyLogger 会保留宿主工程的构建配置与编译选项。库目标仍启用优化；在 Debug 配置下，MD/MT 目标分别使用 `/MDd`/`/MTd`，以匹配应用程序的调试运行库与 STL ABI。
 
 ### Choosing a compiler / 选择编译器
 
