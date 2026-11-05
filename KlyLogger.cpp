@@ -816,7 +816,7 @@ static std::wstring c_format_message(const std::wstring &format, const KlyLogger
 					store.push_back(argument.value.string ? KlyLogger::StringConverter::to_wstring(argument.value.string) : std::wstring());
 					break;
 				case KLY_LOGGER_FORMAT_WIDE_STRING:
-					store.push_back(std::wstring(argument.value.wide_string ? argument.value.wide_string : L""));
+					store.push_back(argument.value.wide_string ? argument.value.wide_string : L"");
 					break;
 				case KLY_LOGGER_FORMAT_POINTER:
 					store.push_back(argument.value.pointer);
