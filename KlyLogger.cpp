@@ -430,16 +430,15 @@ namespace {
 	class Runtime {
 		// Queue lock and worker wake/completion signals.
 		mutable std::mutex m_mutex;
-		std::condition_variable m_work_available;
+		std::condition_variable_any m_work_available;
 		std::condition_variable m_finished;
 		// Log task queue processed by the background thread.
 		std::queue<LogTask> m_queue;
 		// Worker state used by finished() and orderly shutdown.
 		bool m_processing{};
-		bool m_stopping{};
 		// Console/file output backend and its worker thread.
 		Console m_console;
-		std::thread m_worker;
+		std::jthread m_worker;
 
 	public:
 		// Run an operation under the runtime lock and return its result.
@@ -449,16 +448,11 @@ namespace {
 			return func();
 		}
 
-		// Initialize the background thread that processes queued log tasks.
-		Runtime() : m_worker([this] { run(); }) {}
+		// Initialize the background jthread that processes queued log tasks.
+		Runtime() : m_worker([this](const auto &st) { run(st); }) {}
 
-		// Wait for queued output, request worker shutdown, and join the thread.
-		~Runtime() {
-			wait();
-			call_with_lock([this] { m_stopping = true; });
-			m_work_available.notify_one();
-			m_worker.join();
-		}
+		// Wait for queued output; the jthread destructor requests worker shutdown and joins it.
+		~Runtime() { wait(); }
 
 		// Submit a log output task to the logging thread.
 		void submit(std::shared_ptr<const std::wstring> name, std::wstring message, const KlyLogger::LogStyle *style, const std::shared_ptr<const std::function<void()>> &before,
@@ -481,18 +475,18 @@ namespace {
 
 	private:
 		// Process log tasks until runtime shutdown.
-		void run() {
+		void run(const std::stop_token& st) {
 #ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
 			FileLogger::initialize();
 #endif
 
-			// Keep the worker alive until process shutdown, sleeping while the queue is empty instead of busy-waiting.
+			// Keep the worker alive until runtime shutdown, sleeping while the queue is empty instead of busy-waiting.
 			while (true) {
 				LogTask task;
 				{
 					std::unique_lock lock(m_mutex);
-					m_work_available.wait(lock, [this] { return m_stopping || !m_queue.empty(); });
-					if (m_stopping && m_queue.empty()) return;
+					m_work_available.wait(lock, st, [this] { return !m_queue.empty(); });
+					if (st.stop_requested() && m_queue.empty()) return;
 					task = std::move(m_queue.front());
 					m_queue.pop();
 					std::erase(task.message, 0);
@@ -789,6 +783,7 @@ static std::wstring c_format_message(const std::wstring &format, const KlyLogger
 	try {
 		if (!arguments && count != 0) throw fmt::format_error("Format arguments are null!");
 		fmt::dynamic_format_arg_store<fmt::wformat_context> store;
+
 		for (size_t index = 0; index < count; ++index) {
 			switch (const KlyLoggerFormatArg &argument = arguments[index]; argument.type) {
 				case KLY_LOGGER_FORMAT_SIGNED_INTEGER:
