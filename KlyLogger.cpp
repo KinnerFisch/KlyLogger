@@ -71,7 +71,7 @@ namespace {
 	};
 
 	// Retrieve the local time using the platform-safe conversion routine.
-	std::tm get_local_time(const std::time_t &time) {
+	std::tm get_local_time(std::time_t time) {
 		std::tm result{};
 #ifdef _WIN32
 		localtime_s(&result, &time);
@@ -221,7 +221,7 @@ namespace {
 		Console() : m_is_atty(isatty(fileno(stderr)) != 0), m_ansi_supported(initialize_ansi()) { m_line_buffer.reserve(256); }
 
 		// Set the text color for current console output.
-		void set_color(const uint16_t color_win, const std::string_view color) {
+		void set_color(uint16_t color_win, std::string_view color) {
 			if (!m_is_atty) return;
 			if (m_ansi_supported) m_line_buffer.append(color.begin(), color.end());
 #ifdef _WIN32
@@ -230,7 +230,7 @@ namespace {
 		}
 
 		// Output a narrow string to the console and log file.
-		void write(const std::string_view message) {
+		void write(std::string_view message) {
 			if (m_is_atty) {
 				if (m_ansi_supported) m_line_buffer.append(message.begin(), message.end());
 #ifdef _WIN32
@@ -243,7 +243,7 @@ namespace {
 		}
 
 		// Output a wide string to the console and log file.
-		void write(const std::wstring_view message) {
+		void write(std::wstring_view message) {
 			if (m_is_atty) {
 				if (m_ansi_supported) m_line_buffer.append(message);
 #ifdef _WIN32
@@ -294,7 +294,7 @@ namespace {
 		}
 
 		// Process Minecraft color codes in message text and optionally return a plain-text copy with those formatting codes removed.
-		std::wstring process_color_codes(const std::wstring_view message, const uint16_t color_win, const std::string_view color, const bool should_strip_message) {
+		std::wstring process_color_codes(std::wstring_view message, uint16_t color_win, std::string_view color, bool should_strip_message) {
 			// Trailing section signs are incomplete color codes and are dropped, matching the original behaviour;
 			// the scanned range is shrunk instead of copying the string per code.
 			size_t size = message.size();
@@ -336,12 +336,12 @@ namespace {
 	private:
 #ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
 		// Accumulate the plain, color-free line so the file backend converts and writes it once per line instead of once per colored segment. Narrow bytes are kept verbatim.
-		void append_file(const std::string_view message) {
+		void append_file(std::string_view message) {
 			if (m_file_line_buffer.empty() && message.starts_with('\r')) m_file_line_buffer.append(message.substr(1));
 			else m_file_line_buffer.append(message);
 		}
 
-		void append_file(const std::wstring_view message) { m_file_line_buffer += KlyLogger::StringConverter::to_string(message); }
+		void append_file(std::wstring_view message) { m_file_line_buffer += KlyLogger::StringConverter::to_string(message); }
 #endif
 
 		// Initialize the console and check whether ANSI escape sequences are supported. If output is not a terminal, ANSI output stays disabled.
@@ -368,7 +368,7 @@ namespace {
 		}
 
 		// Set console text color and style from a Minecraft-style color code.
-		void apply_minecraft_color_code(const wchar_t code, const uint16_t initial_color, const std::string_view ansi_color) {
+		void apply_minecraft_color_code(wchar_t code, uint16_t initial_color, std::string_view ansi_color) {
 			// Lookup table converting Minecraft colors to ANSI sequences.
 			static constexpr const char *k_colors[]{
 				"\33[30m", "\33[0;34m", "\33[0;32m", "\33[0;36m", "\33[0;31m", "\33[0;35m", "\33[0;33m", "\33[0;37m",
@@ -475,7 +475,7 @@ namespace {
 
 	private:
 		// Process log tasks until runtime shutdown.
-		void run(const std::stop_token& st) {
+		void run(std::stop_token st) {
 #ifndef KLY_LOGGER_OPTION_NO_LOG_FILE
 			FileLogger::initialize();
 #endif
@@ -521,7 +521,7 @@ namespace {
 		}
 
 		// Process one non-empty log line with callbacks and formatting.
-		void process_single_line(const LogTask &task, const std::wstring_view message) {
+		void process_single_line(const LogTask &task, std::wstring_view message) {
 			if (message.empty()) return;
 			if (task.g_before_log_callback) {
 				try {
@@ -613,7 +613,7 @@ namespace {
 	}
 }
 
-std::string KlyLogger::StringConverter::to_string(const std::wstring_view str) {
+std::string KlyLogger::StringConverter::to_string(std::wstring_view str) {
 	if (str.empty()) return {};
 
 	// ASCII fast path: code units below 0x80 are never part of a surrogate pair and map one-to-one onto bytes, so pure-ASCII input is filled in place without entering the UTF-8 encoder.
@@ -659,7 +659,7 @@ std::string KlyLogger::StringConverter::to_string(const std::wstring_view str) {
 	return result;
 }
 
-std::wstring KlyLogger::StringConverter::to_wstring(const std::string_view str) {
+std::wstring KlyLogger::StringConverter::to_wstring(std::string_view str) {
 	if (str.empty()) return {};
 
 	// ASCII fast path: bytes below 0x80 map one-to-one onto code units, so pure-ASCII input is filled in place without entering the UTF-8 decoder.
@@ -752,7 +752,7 @@ bool KlyLogger::is_finished_tasks() { return runtime().finished(); }
 void KlyLogger::wait() { runtime().wait(); }
 
 // Set the minimum severity emitted by every logger instance; defaults to Info.
-void KlyLogger::set_log_level(const LogLevel level) noexcept { shared_log_level().store(level, std::memory_order_relaxed); }
+void KlyLogger::set_log_level(LogLevel level) noexcept { shared_log_level().store(level, std::memory_order_relaxed); }
 
 // Retrieve the minimum severity currently emitted by every logger instance.
 KlyLogger::LogLevel KlyLogger::log_level() noexcept { return shared_log_level().load(std::memory_order_relaxed); }
@@ -779,7 +779,7 @@ void KlyLogger::set_global_before_log_callback(const std::function<void()> &func
 
 // Convert the tagged C argument array into fmt's runtime argument store, then format the complete string in one pass.
 // This preserves fmt's full parser, including positional arguments and nested dynamic width/precision fields.
-static std::wstring c_format_message(const std::wstring &format, const KlyLoggerFormatArg *arguments, const size_t count) {
+static std::wstring c_format_message(const std::wstring &format, const KlyLoggerFormatArg *arguments, size_t count) {
 	try {
 		if (!arguments && count != 0) throw fmt::format_error("Format arguments are null!");
 		fmt::dynamic_format_arg_store<fmt::wformat_context> store;
@@ -831,7 +831,7 @@ static std::wstring c_format_message(const std::wstring &format, const KlyLogger
 	}
 }
 
-static void c_log_formatted(const KlyLogger &logger, const KlyLogger::LogLevel level, const std::wstring &format, const KlyLoggerFormatArg *arguments, const size_t count) {
+static void c_log_formatted(const KlyLogger &logger, const KlyLogger::LogLevel level, const std::wstring &format, const KlyLoggerFormatArg *arguments, size_t count) {
 	// Drop filtered messages before formatting so they cost nothing.
 	if (level < KlyLogger::log_level()) return;
 
@@ -886,80 +886,80 @@ KlyLoggerHandle kly_logger_create_named_narrow(const char *name) {
 	}
 }
 
-void kly_logger_destroy(const KlyLoggerHandle logger) { delete logger; }
+void kly_logger_destroy(KlyLoggerHandle logger) { delete logger; }
 
-const char *kly_logger_string(const KlyLoggerHandle logger) { return logger ? logger->logger.string().c_str() : nullptr; }
+const char *kly_logger_string(KlyLoggerHandle logger) { return logger ? logger->logger.string().c_str() : nullptr; }
 
-const wchar_t *kly_logger_wstring(const KlyLoggerHandle logger) { return logger ? logger->logger.wstring().c_str() : nullptr; }
+const wchar_t *kly_logger_wstring(KlyLoggerHandle logger) { return logger ? logger->logger.wstring().c_str() : nullptr; }
 
-void kly_logger_debug(const KlyLoggerHandle logger, const wchar_t *message) { if (logger) logger->logger.debug(message ? message : L""); }
+void kly_logger_debug(KlyLoggerHandle logger, const wchar_t *message) { if (logger) logger->logger.debug(message ? message : L""); }
 
-void kly_logger_info(const KlyLoggerHandle logger, const wchar_t *message) { if (logger) logger->logger.info(message ? message : L""); }
+void kly_logger_info(KlyLoggerHandle logger, const wchar_t *message) { if (logger) logger->logger.info(message ? message : L""); }
 
-void kly_logger_warn(const KlyLoggerHandle logger, const wchar_t *message) { if (logger) logger->logger.warn(message ? message : L""); }
+void kly_logger_warn(KlyLoggerHandle logger, const wchar_t *message) { if (logger) logger->logger.warn(message ? message : L""); }
 
-void kly_logger_error(const KlyLoggerHandle logger, const wchar_t *message) { if (logger) logger->logger.error(message ? message : L""); }
+void kly_logger_error(KlyLoggerHandle logger, const wchar_t *message) { if (logger) logger->logger.error(message ? message : L""); }
 
-void kly_logger_fatal(const KlyLoggerHandle logger, const wchar_t *message) { if (logger) logger->logger.fatal(message ? message : L""); }
+void kly_logger_fatal(KlyLoggerHandle logger, const wchar_t *message) { if (logger) logger->logger.fatal(message ? message : L""); }
 
-void kly_logger_detail_debug_args(const KlyLoggerHandle logger, const wchar_t *format, const KlyLoggerFormatArg *arguments, const size_t count) {
+void kly_logger_detail_debug_args(KlyLoggerHandle logger, const wchar_t *format, const KlyLoggerFormatArg *arguments, size_t count) {
 	if (logger) c_log_formatted(logger->logger, KlyLogger::LogLevel::Debug, format ? format : L"", arguments, count);
 }
 
-void kly_logger_detail_info_args(const KlyLoggerHandle logger, const wchar_t *format, const KlyLoggerFormatArg *arguments, const size_t count) {
+void kly_logger_detail_info_args(KlyLoggerHandle logger, const wchar_t *format, const KlyLoggerFormatArg *arguments, size_t count) {
 	if (logger) c_log_formatted(logger->logger, KlyLogger::LogLevel::Info, format ? format : L"", arguments, count);
 }
 
-void kly_logger_detail_warn_args(const KlyLoggerHandle logger, const wchar_t *format, const KlyLoggerFormatArg *arguments, const size_t count) {
+void kly_logger_detail_warn_args(KlyLoggerHandle logger, const wchar_t *format, const KlyLoggerFormatArg *arguments, size_t count) {
 	if (logger) c_log_formatted(logger->logger, KlyLogger::LogLevel::Warn, format ? format : L"", arguments, count);
 }
 
-void kly_logger_detail_error_args(const KlyLoggerHandle logger, const wchar_t *format, const KlyLoggerFormatArg *arguments, const size_t count) {
+void kly_logger_detail_error_args(KlyLoggerHandle logger, const wchar_t *format, const KlyLoggerFormatArg *arguments, size_t count) {
 	if (logger) c_log_formatted(logger->logger, KlyLogger::LogLevel::Error, format ? format : L"", arguments, count);
 }
 
-void kly_logger_detail_fatal_args(const KlyLoggerHandle logger, const wchar_t *format, const KlyLoggerFormatArg *arguments, const size_t count) {
+void kly_logger_detail_fatal_args(KlyLoggerHandle logger, const wchar_t *format, const KlyLoggerFormatArg *arguments, size_t count) {
 	if (logger) c_log_formatted(logger->logger, KlyLogger::LogLevel::Fatal, format ? format : L"", arguments, count);
 }
 
-void kly_logger_debug_narrow(const KlyLoggerHandle logger, const char *message) { if (logger) logger->logger.debug(message ? message : ""); }
+void kly_logger_debug_narrow(KlyLoggerHandle logger, const char *message) { if (logger) logger->logger.debug(message ? message : ""); }
 
-void kly_logger_info_narrow(const KlyLoggerHandle logger, const char *message) { if (logger) logger->logger.info(message ? message : ""); }
+void kly_logger_info_narrow(KlyLoggerHandle logger, const char *message) { if (logger) logger->logger.info(message ? message : ""); }
 
-void kly_logger_warn_narrow(const KlyLoggerHandle logger, const char *message) { if (logger) logger->logger.warn(message ? message : ""); }
+void kly_logger_warn_narrow(KlyLoggerHandle logger, const char *message) { if (logger) logger->logger.warn(message ? message : ""); }
 
-void kly_logger_error_narrow(const KlyLoggerHandle logger, const char *message) { if (logger) logger->logger.error(message ? message : ""); }
+void kly_logger_error_narrow(KlyLoggerHandle logger, const char *message) { if (logger) logger->logger.error(message ? message : ""); }
 
-void kly_logger_fatal_narrow(const KlyLoggerHandle logger, const char *message) { if (logger) logger->logger.fatal(message ? message : ""); }
+void kly_logger_fatal_narrow(KlyLoggerHandle logger, const char *message) { if (logger) logger->logger.fatal(message ? message : ""); }
 
-void kly_logger_detail_debug_narrow_args(const KlyLoggerHandle logger, const char *format, const KlyLoggerFormatArg *arguments, const size_t count) {
+void kly_logger_detail_debug_narrow_args(KlyLoggerHandle logger, const char *format, const KlyLoggerFormatArg *arguments, size_t count) {
 	if (logger) c_log_formatted(logger->logger, KlyLogger::LogLevel::Debug, KlyLogger::StringConverter::to_wstring(format ? format : ""), arguments, count);
 }
 
-void kly_logger_detail_info_narrow_args(const KlyLoggerHandle logger, const char *format, const KlyLoggerFormatArg *arguments, const size_t count) {
+void kly_logger_detail_info_narrow_args(KlyLoggerHandle logger, const char *format, const KlyLoggerFormatArg *arguments, size_t count) {
 	if (logger) c_log_formatted(logger->logger, KlyLogger::LogLevel::Info, KlyLogger::StringConverter::to_wstring(format ? format : ""), arguments, count);
 }
 
-void kly_logger_detail_warn_narrow_args(const KlyLoggerHandle logger, const char *format, const KlyLoggerFormatArg *arguments, const size_t count) {
+void kly_logger_detail_warn_narrow_args(KlyLoggerHandle logger, const char *format, const KlyLoggerFormatArg *arguments, size_t count) {
 	if (logger) c_log_formatted(logger->logger, KlyLogger::LogLevel::Warn, KlyLogger::StringConverter::to_wstring(format ? format : ""), arguments, count);
 }
 
-void kly_logger_detail_error_narrow_args(const KlyLoggerHandle logger, const char *format, const KlyLoggerFormatArg *arguments, const size_t count) {
+void kly_logger_detail_error_narrow_args(KlyLoggerHandle logger, const char *format, const KlyLoggerFormatArg *arguments, size_t count) {
 	if (logger) c_log_formatted(logger->logger, KlyLogger::LogLevel::Error, KlyLogger::StringConverter::to_wstring(format ? format : ""), arguments, count);
 }
 
-void kly_logger_detail_fatal_narrow_args(const KlyLoggerHandle logger, const char *format, const KlyLoggerFormatArg *arguments, const size_t count) {
+void kly_logger_detail_fatal_narrow_args(KlyLoggerHandle logger, const char *format, const KlyLoggerFormatArg *arguments, size_t count) {
 	if (logger) c_log_formatted(logger->logger, KlyLogger::LogLevel::Fatal, KlyLogger::StringConverter::to_wstring(format ? format : ""), arguments, count);
 }
 
 bool kly_logger_finished_tasks() { return KlyLogger::is_finished_tasks(); }
 void kly_logger_wait() { KlyLogger::wait(); }
 
-void kly_logger_set_log_level(const KlyLoggerLogLevel level) { KlyLogger::set_log_level(static_cast<KlyLogger::LogLevel>(level)); }
+void kly_logger_set_log_level(KlyLoggerLogLevel level) { KlyLogger::set_log_level(static_cast<KlyLogger::LogLevel>(level)); }
 
 KlyLoggerLogLevel kly_logger_log_level() { return static_cast<KlyLoggerLogLevel>(KlyLogger::log_level()); }
 
-void kly_logger_set_before_log_callback(const KlyLoggerHandle logger, const KlyLoggerBeforeLogCallback callback) {
+void kly_logger_set_before_log_callback(KlyLoggerHandle logger, const KlyLoggerBeforeLogCallback callback) {
 	if (!logger) return;
 	if (!callback) {
 		logger->logger.set_before_log_callback({});
@@ -968,7 +968,7 @@ void kly_logger_set_before_log_callback(const KlyLoggerHandle logger, const KlyL
 	logger->logger.set_before_log_callback(callback);
 }
 
-void kly_logger_set_after_log_callback(const KlyLoggerHandle logger, const KlyLoggerAfterLogCallback callback) {
+void kly_logger_set_after_log_callback(KlyLoggerHandle logger, const KlyLoggerAfterLogCallback callback) {
 	if (!logger) return;
 	if (!callback) {
 		logger->logger.set_after_log_callback({});
@@ -979,7 +979,7 @@ void kly_logger_set_after_log_callback(const KlyLoggerHandle logger, const KlyLo
 	});
 }
 
-void kly_logger_set_global_before_log_callback(const KlyLoggerBeforeLogCallback callback) {
+void kly_logger_set_global_before_log_callback(KlyLoggerBeforeLogCallback callback) {
 	if (!callback) {
 		KlyLogger::set_global_before_log_callback({});
 		return;
@@ -987,7 +987,7 @@ void kly_logger_set_global_before_log_callback(const KlyLoggerBeforeLogCallback 
 	KlyLogger::set_global_before_log_callback(callback);
 }
 
-void kly_logger_set_global_after_log_callback(const KlyLoggerAfterLogCallback callback) {
+void kly_logger_set_global_after_log_callback(KlyLoggerAfterLogCallback callback) {
 	if (!callback) {
 		KlyLogger::set_global_after_log_callback({});
 		return;

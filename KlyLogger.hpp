@@ -134,9 +134,9 @@ public:
 	KlyLogger(const std::wstring &name);
 	// Construct a logger with a std::string name.
 	KlyLogger(const std::string &name);
-	// Copy callbacks while synchronized with callback registration.
+	// Copy the logger; callbacks are snapshotted atomically.
 	KlyLogger(const KlyLogger &logger);
-	// Move callbacks while synchronized with callback registration.
+	// Move the logger; callbacks are snapshotted atomically.
 	KlyLogger(KlyLogger &&logger) noexcept;
 
 	// Retrieve logger name as std::string.
@@ -171,9 +171,9 @@ public:
 	// Retrieve the minimum severity currently emitted by every logger instance.
 	[[nodiscard]] static LogLevel log_level() noexcept;
 
-	// Register a callback function to execute after each log output from this logger.
+	// Register a callback function to execute after each output line from this logger.
 	void set_after_log_callback(const std::function<void(const std::wstring &, const std::wstring &)> &func) const;
-	// Register a callback function to execute before each log output from this logger.
+	// Register a callback function to execute before each output line from this logger.
 	void set_before_log_callback(const std::function<void()> &func) const;
 
 	// Register a callback function to execute after each log output from every logger instance.

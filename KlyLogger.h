@@ -50,9 +50,9 @@ extern "C" {
 // Opaque logger handle. Its C++ implementation is private to KlyLogger.cpp.
 typedef const struct KlyLoggerHandleStruct * KlyLoggerHandle;
 
-// Code to execute before a log message has been output.
+// Code to execute before each output line is written.
 typedef void (*KlyLoggerBeforeLogCallback)();
-// Code to execute after a log message has been output. The callback receives the original message and the plain-text message with formatting removed.
+// Code to execute after each output line is written. The callback receives the original message and the plain-text message with formatting removed.
 typedef void (*KlyLoggerAfterLogCallback)(const wchar_t *original_message, const wchar_t *plain_message);
 
 // Type information retained internally for C arguments passed to fmt.
@@ -81,7 +81,7 @@ typedef enum KlyLoggerLogLevel {
 
 // One tagged formatting argument. Normal calls create these values automatically;
 // the explicit type remains available for advanced use.
-// String and pointer values are borrowed only for the duration of the call.
+// String values must stay valid for the duration of the call; pointer values are copied.
 typedef struct KlyLoggerFormatArg {
 	KlyLoggerFormatArgType type;
 	union {
