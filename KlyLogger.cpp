@@ -449,7 +449,7 @@ namespace {
 		}
 
 		// Initialize the background jthread that processes queued log tasks.
-		Runtime() : m_worker([this](const auto &st) { run(st); }) {}
+		Runtime() : m_worker([this](const auto st) { run(st); }) {}
 
 		// Wait for queued output; the jthread destructor requests worker shutdown and joins it.
 		~Runtime() { wait(); }
